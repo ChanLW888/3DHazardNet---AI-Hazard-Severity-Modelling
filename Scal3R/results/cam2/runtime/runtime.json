@@ -1,0 +1,21 @@
+{
+  "time": 5878.210262298584,
+  "memory": 14.006746768951416,
+  "n_frames": 2500,
+  "segmentation": {
+    "enabled": true,
+    "model": "/home/lcha0115/bt60_scratch/lcha_data/Scal3R/weights/best.pt",
+    "confidence": 0.25,
+    "iou": 0.45
+  },
+  "offload": {
+    "states": false,
+    "batches": true,
+    "outputs": true,
+    "cleanup": true,
+    "offload_dir": "/home/lcha0115/bt60_scratch/lcha_data/Scal3R/results/cam2/runtime/offload"
+  },
+  "runtime_dir": "/home/lcha0115/bt60_scratch/lcha_data/Scal3R/results/cam2/runtime",
+  "runtime_json": "/home/lcha0115/bt60_scratch/lcha_data/Scal3R/results/cam2/runtime/runtime.json",
+  "fps": 0.4252995194871463
+}

@@ -1,0 +1,12 @@
+# Semantic class mapping
+# -1 = no YOLO segmentation
+-1	unlabelled
+0	blocked_footpath_trip_hazard
+1	fallen_fence
+2	grass
+3	loose_trash
+4	mud
+5	paint
+6	road
+7	sidewalk
+8	skip_bin

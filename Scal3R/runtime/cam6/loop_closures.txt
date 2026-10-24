@@ -1,0 +1,4 @@
+# Loop Detection Results (index1, index2, similarity)
+# NMS filtering applied, threshold: 25
+
+# Loop pairs:

@@ -1,0 +1,21 @@
+{
+  "time": 319.95247650146484,
+  "memory": 7.875328540802002,
+  "n_frames": 100,
+  "n_timestamps": 50,
+  "n_cameras": 2,
+  "cameras": [
+    "CAM2",
+    "CAM6"
+  ],
+  "offload": {
+    "states": false,
+    "batches": false,
+    "outputs": false,
+    "cleanup": true,
+    "offload_dir": ""
+  },
+  "runtime_dir": "/fs04/scratch2/bt60/lcha_data/Scal3R/runtime/sequential_4000_4150",
+  "runtime_json": "/fs04/scratch2/bt60/lcha_data/Scal3R/runtime/sequential_4000_4150/runtime.json",
+  "fps": 0.31254641655990484
+}

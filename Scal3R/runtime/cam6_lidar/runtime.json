@@ -1,0 +1,15 @@
+{
+  "time": 705.2692849636078,
+  "memory": 7.875328540802002,
+  "n_frames": 150,
+  "offload": {
+    "states": false,
+    "batches": false,
+    "outputs": false,
+    "cleanup": true,
+    "offload_dir": ""
+  },
+  "runtime_dir": "/fs04/scratch2/bt60/lcha_data/Scal3R/runtime/cam6_lidar",
+  "runtime_json": "/fs04/scratch2/bt60/lcha_data/Scal3R/runtime/cam6_lidar/runtime.json",
+  "fps": 0.21268471943697373
+}
