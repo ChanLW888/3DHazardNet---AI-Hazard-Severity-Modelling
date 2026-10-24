@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=v8_5cm_generator
+#SBATCH --job-name=5cm_generator
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:L40S:1
 #SBATCH --nodes=1
@@ -11,7 +11,7 @@
 #SBATCH --error=v8_5cm_%j.err
 
 echo "============================================================"
-echo "V8 5 CM VOXEL GENERATION"
+echo " 5 CM VOXEL GENERATION"
 echo "============================================================"
 echo "Job ID:  $SLURM_JOB_ID"
 echo "Node:    $SLURMD_NODENAME"

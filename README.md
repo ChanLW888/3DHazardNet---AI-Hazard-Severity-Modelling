@@ -1,869 +1,327 @@
-<div align="center">
-<h1>MapAnything: Universal Feed-Forward Metric <br>3D Reconstruction</h1>
-<a href="https://map-anything.github.io/assets/MapAnything.pdf"><img src="https://img.shields.io/badge/Paper-blue" alt="Paper"></a>
-<a href="https://arxiv.org/abs/2509.13414"><img src="https://img.shields.io/badge/arXiv-2509.13414-b31b1b" alt="arXiv"></a>
-<a href="https://map-anything.github.io/"><img src="https://img.shields.io/badge/Project_Page-green" alt="Project Page"></a>
-<a href="https://x.com/Nik__V__/status/1968316841618518371"><img src="https://img.shields.io/badge/X_Thread-1DA1F2" alt="X Thread"></a>
-<a href="https://huggingface.co/spaces/facebook/map-anything"><img src='https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Demo-blue'></a>
-<br>
-<br>
-<strong>
-<a href="https://nik-v9.github.io/">Nikhil Keetha<sup>1,2</sup></a>
-&nbsp;&nbsp;
-<a href="https://sirwyver.github.io/">Norman Müller<sup>1</sup></a>
-&nbsp;&nbsp;
-<a href="https://demuc.de/">Johannes Schönberger<sup>1</sup></a>
-&nbsp;&nbsp;
-<a href="https://www.linkedin.com/in/lorenzoporzi">Lorenzo Porzi<sup>1</sup></a>
-&nbsp;&nbsp;
-<a href="https://infinity1096.github.io/">Yuchen Zhang<sup>2</sup></a>
-<br>
-<a href="https://tobiasfshr.github.io/">Tobias Fischer<sup>1</sup></a>
-&nbsp;&nbsp;
-<a href="https://www.linkedin.com/in/arno-knapitsch">Arno Knapitsch<sup>1</sup></a>
-&nbsp;&nbsp;
-<a href="https://www.linkedin.com/in/duncan-zauss">Duncan Zauss<sup>1</sup></a>
-&nbsp;&nbsp;
-<a href="https://ethanweber.me/">Ethan Weber<sup>1</sup></a>
-&nbsp;&nbsp;
-<a href="https://www.linkedin.com/in/nelsonantunes7">Nelson Antunes<sup>1</sup></a>
-<br>
-<a href="https://x.com/jonathonluiten?lang=en">Jonathon Luiten<sup>1</sup></a>
-&nbsp;&nbsp;
-<a href="https://m.lopezantequera.com/">Manuel Lopez-Antequera<sup>1</sup></a>
-&nbsp;&nbsp;
-<a href="https://scholar.google.com/citations?user=484sccEAAAAJ">Samuel Rota Bulò<sup>1</sup></a>
-&nbsp;&nbsp;
-<a href="https://richardt.name/">Christian Richardt<sup>1</sup></a>
-<br>
-<a href="https://www.cs.cmu.edu/~deva/">Deva Ramanan<sup>2</sup></a>
-&nbsp;&nbsp;
-<a href="https://theairlab.org/team/sebastian/">Sebastian Scherer<sup>2</sup></a>
-&nbsp;&nbsp;
-<a href="https://www.linkedin.com/in/peter-kontschieder-2a6410134">Peter Kontschieder<sup>1</sup></a>
-<br>
-<br>
-<sup>1</sup> Meta &nbsp;&nbsp;
-<sup>2</sup> Carnegie Mellon University
-</strong>
+# AI-Based 3D Road-Hazard Detection
 
-</div>
+An engineering research project that turns vehicle-mounted camera and LiDAR observations into **camera-relative semantic 3D voxel predictions** of road-adjacent hazards. It combines 2D instance segmentation, metric reconstruction, calibrated image-to-voxel lifting, and dense 3D decoding to identify the spatial extent of **loose trash, mud spill, public greenway, and sidewalk**.
 
-## Overview
+The goal is to progress from “a hazard is visible in an image” to a compact 3D representation suitable for future inspection and infrastructure-asset workflows. This is a research pipeline rather than a production road-maintenance system: its 3D labels are model-derived pseudo-ground truth.
 
-MapAnything is an **open-source research framework** for universal metric 3D reconstruction. At its core is a simple, end-to-end trained transformer model that directly regresses the factored metric 3D geometry of a scene given various types of inputs (images, calibration, poses, or depth). A single feed-forward model supports over 12 different 3D reconstruction tasks including multi-image sfm, multi-view stereo, monocular metric depth estimation, registration, depth completion and more.
+> **Current scope:** V10.1 predicts a 5 cm semantic-occupancy volume from RGB and RF-DETR priors. LiDAR creates the labels and acts as privileged training information, but is absent from deployment inference. GPS is extracted and used to filter samples; georeferenced hazard mapping and quantitative severity scoring are not implemented in the checked-in code.
 
-The framework provides the **complete stack**—data processing, training, inference, and profiling—with a **modular design** that allows different 3D reconstruction models (VGGT, DUSt3R, MASt3R, MUSt3R, Pi3-X, and more) to be used interchangeably through a unified interface.
+## Contents
 
-![Overview](./assets/teaser.png)
+- [Highlights](#highlights)
+- [System architecture](#system-architecture)
+- [Methodology](#methodology)
+- [V10.1 3D hazard model](#v101-3d-hazard-model)
+- [Repository structure](#repository-structure)
+- [Environment and installation](#environment-and-installation)
+- [Data preparation](#data-preparation)
+- [Training and experiments](#training-and-experiments)
+- [Inference and outputs](#inference-and-outputs)
+- [Evaluation and visualisation](#evaluation-and-visualisation)
+- [Limitations and next steps](#limitations-and-next-steps)
+- [Attribution, licensing, and references](#attribution-licensing-and-references)
 
-## Table of Contents
+## Highlights
 
-- [Overview](#overview)
-- [Quick Start](#quick-start)
-  - [Installation](#installation)
-  - [Image-Only Inference](#image-only-inference)
-  - [Multi-Modal Inference](#multi-modal-inference)
-  - [Running External Models](#running-external-models)
-    - [Available Models](#available-models)
-    - [Installation](#external-model-installation)
-    - [Quick Start Example](#external-model-quick-start)
-    - [Running Inference](#running-inference)
-    - [Unified Output Format](#unified-output-format)
-    - [Notes on Input Requirements](#notes-on-input-requirements)
-- [Interactive Demos](#interactive-demos)
-  - [Online Demo](#online-demo)
-  - [Local Gradio Demo](#local-gradio-demo)
-  - [Rerun Demo](#rerun-demo)
-  - [Demo Inference on COLMAP outputs](#demo-inference-on-colmap-outputs)
-- [Profiling](#profiling)
-  - [Profiling Results](#profiling-results)
-  - [Basic Profiling](#basic-profiling)
-  - [Comparing with External Models](#comparing-with-external-models)
-  - [Command-Line Arguments](#command-line-arguments)
-  - [Output Files](#output-files)
-- [COLMAP & GSplat Support](#colmap--gsplat-support)
-  - [Exporting to COLMAP Format](#exporting-to-colmap-format)
-  - [Visualizing COLMAP Reconstruction in Rerun](#visualizing-colmap-reconstruction-in-rerun)
-  - [Integration with Gaussian Splatting](#integration-with-gaussian-splatting)
-- [Data Processing for Training & Benchmarking](#data-processing-for-training--benchmarking)
-- [Training](#training)
-- [Benchmarking](#benchmarking)
-  - [Available Benchmarks](#available-benchmarks)
-- [Code License](#code-license)
-- [Models](#models)
-  - [Hugging Face Hub Models](#-hugging-face-hub-models)
-  - [Hugging Face Hub Models (V1 Release)](#-hugging-face-hub-models-used-for-v1-release-in-september-2025)
-  - [Model Selection Guide](#model-selection-guide)
-  - [Optional Checkpoint Conversion](#optional-checkpoint-conversion)
-- [Building Blocks for MapAnything](#building-blocks-for-mapanything)
-  - [Related Research](#related-research)
-- [Acknowledgments](#acknowledgments)
-- [Citation](#citation)
+- **Sensor-to-voxel workflow:** ROS 2 extraction of RGB, LiDAR, calibration, IMU, and GPS; camera/LiDAR time matching and rectified imagery.
+- **2D-to-3D pseudo-labelling:** RF-DETR segmentation masks are associated with MapAnything camera-frame points and voxelised per image.
+- **Calibrated geometry:** fixed CAM2/CAM6 intrinsics and LiDAR-to-camera transforms, letterbox-aware projection, and metric voxel coordinates.
+- **Dense 3D semantic occupancy:** a separate binary occupancy head and four-class semantic head avoid treating background as a semantic hazard class.
+- **Deployment path:** RGB plus four RF-DETR foreground probability maps; no LiDAR input is required at inference.
+- **Privileged LiDAR training:** a training-only teacher path uses 2D and voxel-aligned LiDAR features, with occupancy and semantic distillation.
+- **Ablation coverage:** RGB-only, LiDAR-disabled/RF-DETR-prior, and compact RGB-only 3D U-Net baselines are included.
+- **Research traceability:** scripts save temporal splits, checkpoints, metrics, compressed voxel predictions, and held-out evaluation artefacts.
 
-## Quick Start
+## System architecture
 
-### Installation
+```mermaid
+flowchart LR
+    A[ROS 2 bag] --> B[fastros_extract.py<br/>RGB, LiDAR, calibration, IMU, GPS]
+    B --> C[Rectified RGB + timestamped LiDAR]
+    C --> D[RF-DETR segmentation]
+    C --> E[MapAnything<br/>single-image RGB + sparse LiDAR depth]
+    D --> F[Per-pixel semantic masks]
+    E --> G[Camera-frame 3D points]
+    F --> H[new_fine_dataset.py<br/>semantic voxelisation]
+    G --> H
+    H --> I[5 cm pseudo-label NPZ volumes]
+    C --> J[generate_priors.py<br/>RF-DETR + LiDAR priors]
+    D --> J
+    J --> K[8-channel cached priors]
+    I --> L[V10.1 training]
+    K --> L
+    L --> M[RGB + RF-DETR student checkpoint]
+    N[Single RGB image] --> O[RF-DETR prior on the fly]
+    O --> P[standalone_infer.py]
+    M --> P
+    P --> Q[Semantic occupancy NPZ + metadata]
+```
+
+This is the custom road-hazard pipeline. MapAnything is used as a pretrained reconstruction component for pseudo-label generation, not retrained by these scripts. The separately vendored `Scal3R/` framework is not imported by the custom hazard scripts.
+
+## Methodology
+
+### Acquisition, synchronisation, and calibration
+
+[`scripts/fastros_extract.py`](scripts/fastros_extract.py) reads a ROS 2 bag with `rosbags`. It handles three cameras (CAM1, CAM2, CAM6), Velodyne point clouds, IMU, GPS position/velocity, and static transforms. It directly converts the documented BGGR Bayer stream, writes rectified PNG images and PLY point clouds (including intensity when present), and saves calibration/synchronisation/GPS artefacts.
+
+The pseudo-label and V10.1 pipelines process **CAM2 and CAM6** independently. LiDAR is projected with camera-specific intrinsics and fixed LiDAR-to-camera transforms. The voxel convention is `X=right`, `Y=down`, `Z=forward` in the camera frame.
+
+### 2D hazard segmentation
+
+[`scripts/rfdetr_train.py`](scripts/rfdetr_train.py) trains external `RFDETRSegSmall`. The pseudo-label generator uses confidence-thresholded instance masks, resolving overlaps in descending confidence order. It starts with five foreground generator classes:
+
+| Generator ID | Label | V10.1 deployment target |
+| --- | --- | --- |
+| 0 | fallen fence | Excluded |
+| 1 | loose trash | `0` |
+| 2 | mud spill | `1` |
+| 3 | public greenway | `2` |
+| 4 | sidewalk | `3` |
+
+The active model keeps only the last four target classes. Background and fallen-fence channels are deliberately excluded from its deployment input and semantic output.
+
+### Metric reconstruction and pseudo-ground truth
+
+[`scripts/new_fine_dataset.py`](scripts/new_fine_dataset.py) generates the main training targets. For each CAM2/CAM6 image with nearby LiDAR it:
+
+1. projects LiDAR into the calibrated image to form sparse depth;
+2. invokes pretrained [MapAnything](https://github.com/facebookresearch/map-anything) with RGB, intrinsics, sparse `depth_z`, and metric scale;
+3. obtains camera-relative `pts3d_cam` and a validity mask;
+4. transfers RF-DETR’s per-pixel class decision to reconstructed points; and
+5. bins points into a fixed semantic voxel grid.
+
+The source region is `X=[-8, 8] m`, `Y=[0, 2] m`, `Z=[0.25, 10] m` at **5 cm**: `320 × 40 × 195` voxels. Labels are `-1` unobserved, `0` observed non-hazard, and `1..5` generator semantic classes. A voxel with several class-labelled points receives the majority class. Each compressed NPZ stores the semantic grid, observed-point occupancy, voxel geometry, camera, timestamp, source image path, and class names.
+
+This is pseudo-ground truth, not independent surveyed 3D annotation. It inherits segmentation/reconstruction error, occlusion, sparse-LiDAR coverage, and the fixed local region of interest.
+
+### Cached RF-DETR and LiDAR priors
+
+[`scripts/generate_priors.py`](scripts/generate_priors.py) produces a matched 8-channel prior per frame:
+
+- channels 0–5: RF-DETR background plus five generator classes;
+- channel 6: normalised projected LiDAR depth; and
+- channel 7: LiDAR support/confidence after dilation and blur.
+
+Priors are letterboxed to `192 × 192` and saved as NPZ files. The script can save raw-resolution LiDAR overlays from the same projection arrays for calibration inspection. V10.1 uses RF-DETR channels 2–5 as its inference input and reserves the two LiDAR channels for the teacher path.
+
+### GPS usage
+
+GPS is extracted by `fastros_extract.py`. [`scripts/filter_gps_npzs.py`](scripts/filter_gps_npzs.py) nearest-matches NPZ timestamps to GPS (100 ms tolerance), copies samples outside a configured exclusion polygon, and writes a CSV audit log. It is a **dataset filter**, not a world-coordinate transformation, multi-frame fusion process, or map exporter.
+
+### Model variants
+
+| Script | Role | Deployment inputs |
+| --- | --- | --- |
+| [`scripts/optimised_trainer.py`](scripts/optimised_trainer.py) | Main V10.1 training | RGB + RF-DETR |
+| [`scripts/standalone_infer.py`](scripts/standalone_infer.py) | Single-image V10.1 inference | RGB + RF-DETR |
+| [`scripts/run_heldout_test.py`](scripts/run_heldout_test.py) | Held-out V10.1 evaluation | RGB + RF-DETR / cached prior |
+| [`scripts/prior_ablation.py`](scripts/prior_ablation.py) | RGB-only ablation | RGB only |
+| [`scripts/lidar_ablation.py`](scripts/lidar_ablation.py) | LiDAR teacher/distillation ablation | RGB + RF-DETR |
+| [`scripts/train_and_infer_3d_unets.py`](scripts/train_and_infer_3d_unets.py) | Compact U-Net / ResU-Net baselines | RGB only |
+
+Several files are experimental version snapshots (`infer_optimised.py`, `run_heldout_test.py`, `lidar_ablation_infer.py`, and `rgb_only_infer.py`). This README reflects static source inspection; no training or inference was run while preparing it.
+
+## V10.1 3D hazard model
+
+No class literally named `3DHazardNet` appears in the repository. The active custom network is `RGBPriorToSemanticVoxelModelV10` in [`scripts/optimised_trainer.py`](scripts/optimised_trainer.py), and is described below as the project’s 3D hazard model.
+
+### Inputs, region, and outputs
+
+Inputs are a `384 × 384` letterboxed RGB image, four `192 × 192` RF-DETR foreground probability maps, camera ID, and letterbox metadata. Training additionally receives the two LiDAR prior maps. The source pseudo-label grid is cropped in memory from `320 × 40 × 195` to `320 × 30 × 195`, retaining `Y=[0, 1.5] m`.
+
+The network outputs one binary foreground-occupancy logit and four semantic logits per target voxel. There is no background semantic class: at inference an empty voxel is stored as semantic value `255`; otherwise semantic argmax yields one of the four target classes.
+
+### Architecture
+
+1. **Image backbone:** ImageNet-initialised ResNet-50 creates C2/C3/C4 features; projections and fusion form a multi-scale feature pyramid.
+2. **RF-DETR fusion:** separate prior encoders inject the four probability maps at P2, P3, and P4, retaining fine semantic evidence.
+3. **Calibrated 2D→3D lift:** Fourier-encoded metric voxel centres are projected through a camera-specific, letterbox-aware pinhole model. `grid_sample` reads P2/P3/P4 features at those locations; a learned gate merges image evidence, position encoding, and a camera embedding into a `40 × 8 × 20` latent volume.
+4. **LiDAR teacher:** training-only LiDAR features are both fused in 2D and projected directly to the latent volume by `LiDARVoxelGeometryLift`. This branch is gated out in student/deployment inference.
+5. **Explicit semantic lift:** RF-DETR probabilities are projected into the latent grid and added as a confidence-preserving log prior to semantic logits. Low total foreground mass stays weak rather than becoming a uniform semantic prediction.
+6. **3D decoder:** residual 3D blocks and trilinear upsampling decode `40 × 8 × 20 → 80 × 16 × 40 → 320 × 30 × 195`. Separate `1×1×1` occupancy and semantic heads are complemented by a coarse semantic deep-supervision head.
+
+### Losses and sampling
+
+Every non-target voxel—including unobserved MapAnything locations—is deliberately an empty occupancy target. Semantic classification is supervised only at observed target-class voxels. The multitask objective combines asymmetric hard-negative focal occupancy loss, weighted semantic cross-entropy/focal/Dice losses, coarse semantic supervision, and warm-started LiDAR-teacher distillation. A `WeightedRandomSampler` upweights images containing rare loose-trash or mud-spill classes by presence, not raw voxel count. Checkpoint selection uses validation foreground mIoU, never the held-out partition.
+
+## Repository structure
+
+```text
+.
+├── scripts/                         # Custom extraction, labels, priors, training, inference, analysis
+│   ├── fastros_extract.py            # ROS 2 RGB/LiDAR/IMU/GPS/calibration extraction
+│   ├── new_fine_dataset.py           # MapAnything + RF-DETR semantic-voxel pseudo-labels
+│   ├── generate_priors.py            # Cached RF-DETR/LiDAR priors
+│   ├── optimised_trainer.py          # Main V10.1 training
+│   ├── standalone_infer.py           # Deployment-style single-image inference
+│   └── run_heldout_test.py           # Held-out metrics and diagnostics
+├── *.slurm                           # HPC generation/training/ablation launch scripts
+├── mapanything/                      # Upstream MapAnything framework
+├── configs/, bash_scripts/           # Upstream Hydra training config and launch scripts
+├── data_processing/, benchmarking/   # Upstream WAI data/benchmark tooling
+├── Scal3R/                           # Separate upstream scalable reconstruction framework
+├── rfdetr_inference/                 # Present but no tracked implementation files found
+├── unet_experiment/                  # Experiment split artefact
+├── tests/                            # Upstream MapAnything tests
+├── pyproject.toml, setup.py          # MapAnything package metadata
+└── LICENSE                           # Root Apache-2.0 licence text
+```
+
+`mapanything/`, `configs/`, `bash_scripts/`, `data_processing/`, `benchmarking/`, and `tests/` are predominantly upstream MapAnything code. The road-hazard contribution is concentrated in root SLURM scripts and `scripts/`.
+
+## Environment and installation
+
+### Baseline package
+
+The root package metadata declares Python `>=3.10` and MapAnything dependencies. Install a CUDA-compatible PyTorch build appropriate to the target machine, then install the repository:
 
 ```bash
-git clone https://github.com/facebookresearch/map-anything.git
-cd map-anything
+git clone <repository-url>
+cd FYP
 
-# Create and activate conda environment
-conda create -n mapanything python=3.12 -y
-conda activate mapanything
-
-# Optional: Install torch, torchvision & torchaudio specific to your system
-# Install MapAnything
-pip install -e .
-
-# For all optional dependencies
-# This includes external model support (VGGT, VGGT-Omega, DUSt3R, MASt3R, MUSt3R, Pi3-X, DA3, etc.)
-# See "Running External Models" section for more details
-# See pyproject.toml for more details on installed packages
-pip install -e ".[all]"
-pre-commit install
+# Create/activate a supported Python environment and install PyTorch for your CUDA platform first.
+python -m pip install -e .
 ```
 
-Note that we don't pin a specific version of PyTorch or CUDA in our requirements. Please feel free to install PyTorch based on your specific system.
+Optional MapAnything extras are defined in [`pyproject.toml`](pyproject.toml), including `.[colmap]` and `.[all]`. Consult the included upstream [training guide](train.md) and [data-processing guide](data_processing/README.md) for original MapAnything workflows.
 
-### Image-Only Inference
+### Project-specific requirements
 
-For metric 3D reconstruction from images without additional geometric inputs:
+The hazard scripts import packages not fully pinned by the root metadata:
 
-```python
-# Optional config for better memory efficiency
-import os
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+| Stage | Requirements evident from source |
+| --- | --- |
+| RF-DETR | API-compatible `rfdetr` exposing `RFDETRSegSmall` and a trained checkpoint |
+| ROS extraction | `rosbags`, SBG ROS message definitions, OpenCV, NumPy |
+| GPS filtering | `pandas`, `matplotlib` |
+| V10.1 training/inference | PyTorch, TorchVision, Pillow, NumPy, CUDA; RF-DETR for live priors |
+| Label generation | MapAnything dependencies and access to `facebook/map-anything` pretrained weights/cache |
 
-# Required imports
-import torch
-from mapanything.models import MapAnything
-from mapanything.utils.image import load_images
+Private data, RF-DETR checkpoints, pseudo-labels, and V10.1 weights are not included. Custom scripts embed machine-local paths; configure paths, calibration, and checkpoint compatibility before execution.
 
-# Get inference device
-device = "cuda" if torch.cuda.is_available() else "cpu"
+### Hardware
 
-# Init model - This requires internet access or the huggingface hub cache to be pre-downloaded
-# For Apache 2.0 license model, use "facebook/map-anything-apache"
-model = MapAnything.from_pretrained("facebook/map-anything").to(device)
+MapAnything/RF-DETR label generation uses GPU. V10.1 requires CUDA and dense 5 cm volumes. The supplied SLURM jobs request one L40S GPU, 32 CPU cores, 128 GB RAM, and 24–48 hours, so this should be treated as a GPU/HPC workflow rather than an ordinary laptop demo.
 
-# Load and preprocess images from a folder or list of paths
-images = "path/to/your/images/"  # or ["path/to/img1.jpg", "path/to/img2.jpg", ...]
-views = load_images(images)
+## Data preparation
 
-# Run inference
-predictions = model.infer(
-    views,                            # Input views
-    memory_efficient_inference=True,  # Trades off speed for more views (up to 2000 views on 140 GB). Trade off is negligible - see profiling section
-    minibatch_size=None,              # Minibatch size for memory-efficient inference (use 1 for smallest GPU memory consumption). Default is dynamic computation based on available GPU memory.
-    use_amp=True,                     # Use mixed precision inference (recommended)
-    amp_dtype="bf16",                 # bf16 inference (recommended; falls back to fp16 if bf16 not supported)
-    apply_mask=True,                  # Apply masking to dense geometry outputs
-    mask_edges=True,                  # Remove edge artifacts by using normals and depth
-    apply_confidence_mask=False,      # Filter low-confidence regions
-    confidence_percentile=10,         # Remove bottom 10 percentile confidence pixels
-    use_multiview_confidence=False,   # Enable multi-view depth consistency based confidence in place of learning-based one
-)
+The following order reflects actual input/output contracts. Paths are intentionally symbolic.
 
-# Access results for each view - Complete list of metric outputs
-for i, pred in enumerate(predictions):
-    # Geometry outputs
-    pts3d = pred["pts3d"]                     # 3D points in world coordinates (B, H, W, 3)
-    pts3d_cam = pred["pts3d_cam"]             # 3D points in camera coordinates (B, H, W, 3)
-    depth_z = pred["depth_z"]                 # Z-depth in camera frame (B, H, W, 1)
-    depth_along_ray = pred["depth_along_ray"] # Depth along ray in camera frame (B, H, W, 1)
+1. Configure and run [`scripts/fastros_extract.py`](scripts/fastros_extract.py) for a ROS 2 bag with expected image, LiDAR, IMU, GPS, and TF topics.
+2. Validate CAM2/CAM6 RGB-LiDAR calibration; `generate_priors.py` can create projection overlays.
+3. Configure and run [`scripts/new_fine_dataset.py`](scripts/new_fine_dataset.py) with the dataset root and RF-DETR checkpoint to create per-image semantic voxel NPZs.
+4. Optionally run [`scripts/filter_gps_npzs.py`](scripts/filter_gps_npzs.py) to apply its configured exclusion-polygon filter.
+5. Run [`scripts/generate_priors.py`](scripts/generate_priors.py) to create matched eight-channel prior NPZs.
 
-    # Camera outputs
-    ray_directions = pred["ray_directions"]   # Ray directions in camera frame (B, H, W, 3)
-    intrinsics = pred["intrinsics"]           # Recovered pinhole camera intrinsics (B, 3, 3)
-    camera_poses = pred["camera_poses"]       # OpenCV (+X - Right, +Y - Down, +Z - Forward) cam2world poses in world frame (B, 4, 4)
-    cam_trans = pred["cam_trans"]             # OpenCV (+X - Right, +Y - Down, +Z - Forward) cam2world translation in world frame (B, 3)
-    cam_quats = pred["cam_quats"]             # OpenCV (+X - Right, +Y - Down, +Z - Forward) cam2world quaternion in world frame (B, 4)
+The main trainer treats the prior directory as the master index, matching each prior by camera/timestamp to the semantic target and using the source-image path stored in that target.
 
-    # Quality and masking
-    confidence = pred["conf"]                 # Per-pixel confidence scores (B, H, W)
-    mask = pred["mask"]                       # Combined validity mask (B, H, W, 1)
-    non_ambiguous_mask = pred["non_ambiguous_mask"]                # Non-ambiguous regions (B, H, W)
-    non_ambiguous_mask_logits = pred["non_ambiguous_mask_logits"]  # Mask logits (B, H, W)
+## Training and experiments
 
-    # Scaling
-    metric_scaling_factor = pred["metric_scaling_factor"]  # Applied metric scaling (B,)
-
-    # Original input
-    img_no_norm = pred["img_no_norm"]         # Denormalized input images for visualization (B, H, W, 3)
-```
-
-### Multi-Modal Inference
-
-MapAnything supports flexible combinations of geometric inputs for enhanced metric reconstruction. Steps to try it out:
-
-**Initialize the model:**
-
-```python
-# Optional config for better memory efficiency
-import os
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-
-# Required imports
-import torch
-from mapanything.models import MapAnything
-
-# Get inference device
-device = "cuda" if torch.cuda.is_available() else "cpu"
-
-# Init model - This requires internet access or the huggingface hub cache to be pre-downloaded
-# For Apache 2.0 license model, use "facebook/map-anything-apache"
-model = MapAnything.from_pretrained("facebook/map-anything").to(device)
-```
-
-**Initialize the inputs:**
-
-```python
-# MapAnything is extremely flexible and supports any combination of inputs.
-views_example = [
-    {
-        # View 0: Images + Calibration
-        "img": image, # (H, W, 3) - [0, 255]
-        "intrinsics": intrinsics, # (3, 3)
-    },
-    {
-        # View 1: Images + Calibration + Depth
-        "img": image, # (H, W, 3) - [0, 255]
-        "intrinsics": intrinsics, # (3, 3)
-        "depth_z": depth_z, # (H, W)
-        "is_metric_scale": torch.tensor([True], device=device), # (1,)
-    },
-    {
-        # View 2: Images + Calibration + Depth + Pose
-        "img": image, # (H, W, 3) - [0, 255]
-        "intrinsics": intrinsics, # (3, 3)
-        "depth_z": depth_z, # (H, W)
-        "camera_poses": camera_poses, # (4, 4) or tuple of (quats, trans) in OpenCV cam2world convention
-        "is_metric_scale": torch.tensor([True], device=device), # (1,)
-    },
-    ...
-]
-```
-
-Note that MapAnything expects the input camera poses to follow the OpenCV (+X - Right, +Y - Down, +Z - Forward) cam2world convention.
-
-<!-- TODO: We provide a helper function `mapanything.utils.geometry.convert_cam_convention` to convert from other conventions to OpenCV (see the function in [geometry utils](./mapanything/utils/geometry.py) for more details). -->
-
-<details>
-<summary>Expand to show more examples</summary>
-
-```python
-# Example 1: Images + Camera Intrinsics
-views_example = [
-    {
-        "img": image_tensor,  # (H, W, 3) - [0, 255]
-        "intrinsics": intrinsics_tensor,  # (3, 3)
-    },
-    ...
-]
-
-# Example 2: Images + Intrinsics + Depth
-views_example = [
-    {
-        "img": image_tensor, # (H, W, 3) - [0, 255]
-        "intrinsics": intrinsics_tensor, # (3, 3)
-        "depth_z": depth_tensor,  # (H, W)
-        "is_metric_scale": torch.tensor([True]), # (1,)
-    },
-    ...
-]
-
-# Example 3: Images + Intrinsics + Camera Poses
-views_example = [
-    {
-        "img": image_tensor, # (H, W, 3) - [0, 255]
-        "intrinsics": intrinsics_tensor, # (3, 3)
-        "camera_poses": pose_matrices,  # (4, 4) or tuple of (quats, trans) in OpenCV cam2world convention
-        "is_metric_scale": torch.tensor([True]), # (1,)
-    },
-    ...
-]
-
-# Example 4: Images + Ray Directions + Depth (alternative to intrinsics)
-views_example = [
-    {
-        "img": image_tensor, # (H, W, 3) - [0, 255]
-        "ray_directions": ray_dirs_tensor,  # (H, W, 3)
-        "depth_z": depth_tensor, # (H, W)
-    }
-    ...
-]
-
-# Example 5: Full Multi-Modal (Images + Intrinsics + Depth + Poses)
-views_example = [
-    {
-        "img": image_tensor, # (H, W, 3) - [0, 255]
-        "intrinsics": intrinsics_tensor, # (3, 3)
-        "depth_z": depth_tensor, # (H, W)
-        "camera_poses": pose_matrices, # (4, 4) or tuple of (quats, trans) in OpenCV cam2world convention
-        "is_metric_scale": torch.tensor([True]), # (1,)
-    }
-    ...
-]
-
-# Example 6: Adaptive Mixed Inputs
-views_example = [
-    {
-        # View 0: Images + Pose
-        "img": images, # (H, W, 3) - [0, 255]
-        "camera_poses": camera_poses, # (4, 4) or tuple of (quats, trans) in OpenCV cam2world convention
-    },
-    {
-        # View 1: Images + Calibration
-        "img": images, # (H, W, 3) - [0, 255]
-        "intrinsics": intrinsics, # (3, 3)
-    },
-    {
-        # View 2: Images + Calibration + Depth
-        "img": images, # (H, W, 3) - [0, 255]
-        "intrinsics": intrinsics, # (3, 3)
-        "depth_z": depth_z, # (H, W)
-        "is_metric_scale": torch.tensor([True], device=device), # (1,)
-    },
-    {
-        # View 3: Images + Calibration + Depth + Pose
-        "img": images, # (H, W, 3) - [0, 255]
-        "intrinsics": intrinsics, # (3, 3)
-        "depth_z": depth_z, # (H, W)
-        "camera_poses": camera_poses, # (4, 4) or tuple of (quats, trans) in OpenCV cam2world convention
-        "is_metric_scale": torch.tensor([True], device=device), # (1,)
-    },
-    ...
-]
-```
-</details>
-
-<br>
-
-**Run model inference:**
-
-```python
-from mapanything.utils.image import preprocess_inputs
-
-# Preprocess inputs to the expected format
-processed_views = preprocess_inputs(views_example)
-
-# Run inference with any combination of inputs
-predictions = model.infer(
-    processed_views,                  # Any combination of input views
-    memory_efficient_inference=True, # Trades off speed for more views (up to 2000 views on 140 GB). Trade off is negligible - see profiling section
-    minibatch_size=None,              # Minibatch size for memory-efficient inference (use 1 for smallest GPU memory consumption). Default is dynamic computation based on available GPU memory.
-    use_amp=True,                     # Use mixed precision inference (recommended)
-    amp_dtype="bf16",                 # bf16 inference (recommended; falls back to fp16 if bf16 not supported)
-    apply_mask=True,                  # Apply masking to dense geometry outputs
-    mask_edges=True,                  # Remove edge artifacts by using normals and depth
-    apply_confidence_mask=False,      # Filter low-confidence regions
-    confidence_percentile=10,         # Remove bottom 10 percentile confidence pixels
-    use_multiview_confidence=False,   # Enable multi-view depth consistency based confidence in place of learning-based one
-    # Control which inputs to use/ignore
-    # By default, all inputs are used when provided
-    # If is_metric_scale flag is not provided, all inputs are assumed to be in metric scale
-    ignore_calibration_inputs=False,
-    ignore_depth_inputs=False,
-    ignore_pose_inputs=False,
-    ignore_depth_scale_inputs=False,
-    ignore_pose_scale_inputs=False,
-)
-
-# Access results for each view - Complete list of metric outputs
-# Outputs are the same as above (image-only input case), but with additional inputs used
-```
-
-**Input requirements for `model.infer`:**
-- `img`: RGB images normalized according to `data_norm_type`
-- `data_norm_type`: Normalization type (must match model's encoder requirements)
-
-**Optional geometric inputs supported by `model.infer`:**
-- `intrinsics` OR `ray_directions`: Camera calibration (cannot provide both since they are redundant)
-- `depth_z`: Z-depth maps (requires calibration info)
-- `camera_poses`: OpenCV (+X - Right, +Y - Down, +Z - Forward) cam2world poses as 4×4 matrices or (quaternions, translations)
-- `is_metric_scale`: Whether inputs are in metric scale
-
-**Key constraints for `model.infer`:**
-- If `depth_z` is provided, must also provide `intrinsics` or `ray_directions`
-- If any view has `camera_poses`, the first view (reference) must also have them
-- Cannot provide both `intrinsics` and `ray_directions` simultaneously (they are redundant)
-
-The above constraints are enforced in the inference API. However, if desired, the underlying `model.forward` can support any arbitrary combination of inputs (a total of 64 configurations; without counting per view flexibility).
-
-### Running External Models
-
-The MapAnything codebase is **modular** — different 3D reconstruction models can be used interchangeably through a unified model factory interface. All model wrappers produce outputs in a **unified format** following MapAnything conventions (`pts3d`, `pts3d_cam`, `ray_directions`, `depth_along_ray`, `cam_trans`, `cam_quats`, `conf`, etc.). This enables fair comparison, benchmarking, and easy experimentation across methods.
-
-#### Available Models
-
-| Model Key | Description | Resolution | Data Norm Type | Install Extra |
-|-----------|-------------|------------|----------------|---------------|
-| `mapanything` | MapAnything | 518 | `dinov2` | (base) |
-| `mapanything_ablations` | MapAnything ablations | 518 | `dinov2` | (base) |
-| `modular_dust3r` | ModularDUSt3R | 512 | `dust3r` | (base) |
-| `vggt` | VGGT 1B | 518 | `identity` | (base) |
-| `vggt_omega` | VGGT-Omega 1B | 512 | `identity` | `vggt-omega` |
-| `dust3r` | DUSt3R + Global BA | 512 | `dust3r` | `dust3r` |
-| `mast3r` | MASt3R + SGA | 512 | `dust3r` | `mast3r` |
-| `moge` | MoGe | 518 | `identity` | (base) |
-| `must3r` | MUSt3R | 512 | `dust3r` | `must3r` |
-| `pi3` | π³ | 518 | `identity` | (base) |
-| `pi3x` | π³-X | 518 | `identity` | `pi3` |
-| `pow3r` | Pow3R | 512 | `dust3r` | `pow3r` |
-| `pow3r_ba` | Pow3R + BA | 512 | `dust3r` | `pow3r` |
-| `anycalib` | AnyCalib | - | - | `anycalib` |
-| `da3` | Depth Anything 3 | 504 | `dinov2` | `depth-anything-3` |
-
-#### Installation {#external-model-installation}
-
-Install optional dependencies for external models:
+The verified main entry point is [`scripts/optimised_trainer.py`](scripts/optimised_trainer.py):
 
 ```bash
-# Install specific external model dependencies
-pip install -e ".[dust3r]"           # DUSt3R
-pip install -e ".[mast3r]"           # MASt3R
-pip install -e ".[pi3]"              # π³-X (note: π³ base works without this)
-pip install -e ".[pow3r]"            # Pow3R
-pip install -e ".[anycalib]"         # AnyCalib
-pip install -e ".[must3r]"           # MUSt3R
-pip install -e ".[vggt-omega]"       # VGGT-Omega
-pip install -e ".[depth-anything-3]" # Depth Anything 3
-
-# Or install all external model dependencies
-pip install -e ".[all]"
+python scripts/optimised_trainer.py \
+  --epochs 50 \
+  --batch_size 1 \
+  --workers 4
 ```
 
-#### Quick Start Example {#external-model-quick-start}
+It also supports `--lr`, `--overfit_test`, `--no_sampler`, and `--resume [CHECKPOINT]`. Defaults contain experiment-specific dataset/output paths, so adapt those before running. Samples are temporally split independently for each camera: 80% train, 10% validation, 10% test.
 
-**Example 1: Using `init_model_from_config` (recommended)**
+[`run_optimised.slurm`](run_optimised.slurm), [`run_lidar_ablation.slurm`](run_lidar_ablation.slurm), and [`run_prior_ablation.slurm`](run_prior_ablation.slurm) launch the corresponding GPU jobs, but contain site-specific module, conda, and directory values that must be adapted outside the original HPC environment.
 
-```python
-from mapanything.models import init_model_from_config
-
-# Initialize model by name - handles Hydra config composition automatically
-# Options are based on configs available in configs/model
-# The model is returned on the specified device
-model = init_model_from_config("vggt", device="cuda")
-
-# Other examples:
-# model = init_model_from_config("vggt_omega", device="cuda")
-# model = init_model_from_config("pi3x", device="cuda")
-# model = init_model_from_config("da3_nested", device="cuda")
-# Note: For MUSt3R and VGGT-Omega, the values in configs/machine/default.yaml need to be populated to enable checkpoint loading
-# model = init_model_from_config("must3r", device="cuda")
-```
-
-**Example 2: Using `model_factory` directly**
-
-```python
-from mapanything.models import model_factory, get_available_models
-
-# List all available models
-print(get_available_models())
-# ['mapanything', 'mapanything_ablations', 'modular_dust3r', 'anycalib',
-#  'da3', 'dust3r', 'mast3r', 'moge', 'must3r', 'pi3', 'pi3x', 'pow3r',
-#  'pow3r_ba', 'vggt', 'vggt_omega']
-
-# Initialize external model
-# Requires passing in additional model config arguments as kwargs
-# model = model_factory("model_name", **model_config_kwargs)
-model = model_factory("vggt", name="vggt", torch_hub_force_reload=False)
-model = model.to("cuda")
-```
-
-#### Running Inference
-
-All model wrappers follow the same `forward()` interface. The model expects a list of view dictionaries as input and returns a list of prediction dictionaries:
-
-```python
-import torch
-from mapanything.utils.image import load_images
-
-# Load and preprocess images from a folder
-# This handles resizing and normalization based on model requirements
-views = load_images(
-    folder_or_list="path/to/images",  # Folder path or list of image paths
-    resolution_set=518,               # Model-specific resolution (see table above)
-    norm_type="dinov2",               # Model-specific normalization (see table above)
-    patch_size=14,
-)
-
-# Run inference
-model.eval()
-with torch.no_grad():
-    with torch.autocast("cuda"):
-        predictions = model(views)
-
-# predictions is a list of dicts, one per input view
-# See the Unified Output Format section below for more details
-```
-
-Each input view dictionary must contain at minimum an `img` tensor of shape `(B, 3, H, W)` with the appropriate normalization applied. The `load_images` utility handles this preprocessing automatically. For more advanced inference patterns including loss computation and device handling, see the `loss_of_one_batch_multi_view` function in `mapanything/utils/inference.py`.
-
-#### Unified Output Format
-
-All model wrappers produce outputs in a consistent format:
-
-| Output Key | Description |
-|------------|-------------|
-| `pts3d` | 3D points in world coordinates |
-| `pts3d_cam` | 3D points in camera coordinates |
-| `ray_directions` | Ray directions in camera frame |
-| `depth_along_ray` | Depth along ray |
-| `cam_trans` | Camera translation (cam2world) |
-| `cam_quats` | Camera quaternion (cam2world) |
-| `conf` | Per-pixel confidence scores |
-
-This unified output format allows:
-- Fair comparison between methods
-- Easy swapping of models for experimentation
-- Consistent downstream processing pipelines
-
-#### Notes on Input Requirements
-
-Different models have different input requirements:
-
-**Resolution - Longest Side**:
-- 518px: MapAnything, VGGT, MoGe, Pi3, Pi3X
-- 512px: VGGT-Omega, DUSt3R, MASt3R, MUSt3R, Pow3R
-- 504px: Depth Anything 3
-
-**Data Normalization (`data_norm_type`)**:
-- `dinov2`: MapAnything, Depth Anything 3
-- `identity`: VGGT, VGGT-Omega, MoGe, Pi3, Pi3X
-- `dust3r`: DUSt3R, MASt3R, MUSt3R, Pow3R
-
-For training and fine-tuning external models, see the [Training README](train.md) for detailed instructions.
-
-## Interactive Demos
-
-We provide multiple interactive demos to try out MapAnything!
-
-### Online Demo
-
-Try our online demo without installation: [🤗 Hugging Face Demo](https://huggingface.co/spaces/facebook/map-anything)
-
-### Local Gradio Demo
-
-We provide a script to launch our Gradio app. The interface and GUI mirrors our [online demo](https://huggingface.co/spaces/facebook/map-anything) where you can upload images/videos, run reconstruction and interactively view them. You can launch this using:
+For RGB-only baseline comparison, [`scripts/train_and_infer_3d_unets.py`](scripts/train_and_infer_3d_unets.py) exposes:
 
 ```bash
-# Install requirements for the app
-pip install -e ".[gradio]"
-
-# Launch app locally
-python scripts/gradio_app.py
+python scripts/train_and_infer_3d_unets.py \
+  --model image2voxel_resunet \
+  --epochs 50
 ```
 
-<details>
-<summary>Expand to preview the Gradio demo interface</summary>
+No numerical results are quoted here: the repository does not contain a reliable tracked experiment summary from which to report them.
 
-![Gradio Interface Preview](./assets/gradio_example.png)
-</details>
+## Inference and outputs
 
-### Rerun Demo
-
-We provide a demo script for interactive 3D visualization of metric reconstruction results using [Rerun](https://rerun.io/).
+[`scripts/standalone_infer.py`](scripts/standalone_infer.py) is the most self-contained V10.1 path. It takes one RGB image, a CAM2/CAM6 selection, a V10.1 checkpoint, and an RF-DETR checkpoint; it generates the RF-DETR prior on the fly and disables LiDAR:
 
 ```bash
-# Terminal 1: Start the Rerun server
-rerun --serve --port 2004 --web-viewer-port 2006
-
-# Terminal 2: Run MapAnything demo
-python scripts/demo_images_only_inference.py \
-    --image_folder /path/to/your/images \
-    --viz \
-    --save_glb \
-    --output_path /path/to/output.glb
-
-# Terminal 3 or Local Machine: Open web viewer at http://127.0.0.1:2006 (You might need to port forward if using a remote server)
+python scripts/standalone_infer.py \
+  --image /path/to/image.png \
+  --cam CAM2 \
+  --checkpoint /path/to/v10_1_checkpoint.pth \
+  --rfdetr_checkpoint /path/to/rfdetr_checkpoint.pth \
+  --output /path/to/inference_output
 ```
 
-Additional options:
-- `--apache`: Use the Apache 2.0 licensed model
-- `--video_viz_for_rerun`: Enable video-style visualization with time indexing
-- `--log_only_imgs_for_rerun_cams`: Log only images for Rerun cameras (skip depth/mask)
+The command is verified against the argument parser but was not run during this documentation work. The selected camera must be compatible with the model/calibration.
 
-Optionally, if rerun is installed locally, local rerun viewer can be spawned using: `rerun --connect rerun+http://127.0.0.1:2004/proxy`.
+For `image.png`, output is:
 
-### Demo Inference on COLMAP outputs
-
-We provide a demo script to run MapAnything inference on COLMAP outputs. The script runs MapAnything in MVS mode by default (using COLMAP calibration and poses as input). Use the `--help` flag for more info.
-
-```bash
-# Terminal 1: Start the Rerun server
-rerun --serve --port 2004 --web-viewer-port 2006
-
-# Terminal 2: Run MapAnything inference on COLMAP output folder
-python scripts/demo_inference_on_colmap_outputs.py \
-    --colmap_path /path/to/your/colmap_output \
-    --viz
-
-# Terminal 3 or Local Machine: Open web viewer at http://127.0.0.1:2006 (You might need to port forward if using a remote server)
+```text
+<output>/CAM2_image/
+├── image_original.png
+├── rfdetr_prior.npz
+├── prediction.npz
+└── metadata.json
 ```
 
-Additional options:
-- `--apache`: Use the Apache 2.0 licensed model
-- `--stride N`: Load every Nth image (default: 1)
-- `--ext .bin/.txt`: COLMAP file extension (default: .bin)
-- `--ignore_calibration_inputs`: Ignore COLMAP calibration (use only images and poses)
-- `--ignore_pose_inputs`: Ignore COLMAP poses (use only images and calibration)
-- `--save_colmap`: Export results in COLMAP format
-- `--save_glb`: Save reconstruction as GLB file
-- `--output_directory`: Output directory for COLMAP or GLB exports (default: colmap_mapanything_output)
-- `--verbose`: Enable verbose loading output
+`prediction.npz` includes semantic labels, continuous and binary occupancy, semantic confidence/probabilities, voxel geometry, camera/image metadata, class names, and occupancy threshold. Semantic values `0..3` are target classes and `255` denotes predicted empty space.
 
-Optionally, if rerun is installed locally, local rerun viewer can be spawned using: `rerun --connect rerun+http://127.0.0.1:2004/proxy`.
+The repository also retains upstream MapAnything tools for image/multimodal reconstruction, COLMAP/GLB export, and Rerun visualisation: [`scripts/demo_colmap.py`](scripts/demo_colmap.py), [`scripts/demo_inference_on_colmap_outputs.py`](scripts/demo_inference_on_colmap_outputs.py), and [`scripts/visualize_colmap_format_in_rerun.py`](scripts/visualize_colmap_format_in_rerun.py). These are not a complete road-hazard reporting interface.
 
-## Profiling
+## Evaluation and visualisation
 
-Profile GPU memory usage and inference speed of MapAnything across different view counts. The profiling script supports comparison with external models and outputs both JSON results and visualizations.
+Training logs occupancy precision/recall/F1 plus foreground and small-hazard mIoU. It saves periodic compressed test predictions but does not use test results for checkpoint selection.
 
-### Profiling Results
+[`scripts/run_heldout_test.py`](scripts/run_heldout_test.py) supports held-out selection from an original test log or temporal split and deployment-style inference without LiDAR. Its outputs include:
 
-MapAnything achieves the best speed and memory profile compared to existing methods, enabling efficient inference across a wide range of view counts.
+- exact voxel occupancy precision, recall, and F1;
+- foreground-conditioned per-class IoU/mIoU at reference foreground positions;
+- class-agnostic nearest-occupied-voxel matching at 5, 10, and 20 cm; and
+- non-overlapping coarse-cell occupancy overlap at 10, 20, and 40 cm.
 
-<table>
-<tr>
-<td><img src="./assets/profiling_memory.png" alt="Memory Profiling" width="100%"></td>
-<td><img src="./assets/profiling_speed.png" alt="Speed Profiling" width="100%"></td>
-</tr>
-<tr>
-<td align="center"><b>Peak GPU Memory vs Number of Views</b></td>
-<td align="center"><b>Inference Speed vs Number of Views</b></td>
-</tr>
-</table>
+The evaluator explicitly identifies its reference as MapAnything-derived pseudo-ground truth. Its optional post-hoc translation alignment is kept separate from the unbiased held-out summary and is not used for model selection.
 
-**Note on Memory Efficient Mode:** MapAnything (Mem Efficient) in the plots refers to using `memory_efficient_inference=True` with mini batch size 1 in the `.infer()` and `.forward()` calls. This mode trades off speed for reduced memory consumption, enabling inference on a larger number of views (up to 2000 views on 140 GB). As seen in the plots, the speed trade off is negligible.
+No project-specific hazard figures are tracked in the repository, so this README intentionally does not display unreproducible generated images. Existing visual outputs include LiDAR projection overlays, compressed voxel volumes for external viewers, upstream Rerun/COLMAP tooling, and the separate `Scal3R/` camera/point-cloud visualisation utilities.
 
-### Basic Profiling
+## Limitations and next steps
 
-```bash
-# Profile MapAnything (default and memory-efficient modes)
-python scripts/profile_memory_runtime.py \
-    --output_dir /path/to/results
+### Established limitations
 
-# Profile with a specific checkpoint
-python scripts/profile_memory_runtime.py \
-    --output_dir /path/to/results \
-    --mapanything_checkpoint /path/to/checkpoint.pth
+- Labels depend on RF-DETR and MapAnything rather than manually verified dense 3D ground truth.
+- The output is a fixed, camera-relative local grid; predictions are not globally fused or georeferenced.
+- “Hazard” covers only four RF-DETR-derived road-environment classes, not a general safety ontology.
+- Unobserved reconstruction regions are intentionally trained as empty occupancy, which can bias learning under incomplete coverage.
+- The workflow is camera/calibration specific (CAM2/CAM6) and depends on compatible image geometry.
+- No code converts voxel outputs to severity, repair priority, depth/area estimates, or asset-management actions.
+- GPS currently supports filtering only; no map layer, frame association, or geo-export is implemented.
+- Private data/checkpoints and machine-local constants limit out-of-the-box reproducibility.
 
-# Use Apache 2.0 licensed model
-python scripts/profile_memory_runtime.py \
-    --output_dir /path/to/results \
-    --apache
-```
+### Future work
 
-### Comparing with External Models
+- Obtain manually verified 3D labels and evaluate against independent geometric measurements.
+- Package paths, dependencies, calibration, and experiment manifests into portable configuration.
+- Fuse temporally adjacent predictions with vehicle poses/GPS into an uncertainty-aware world-frame map.
+- Derive and validate severity using measured 3D extent, depth, persistence, and confidence.
+- Publish fixed route-level evaluation results and qualitative examples for each ablation.
 
-External models are loaded using their Hydra config files from `configs/model/<model_name>.yaml`. Make sure the required dependencies are installed (see [Running External Models](#running-external-models)).
+## Attribution, licensing, and references
 
-```bash
-# Compare MapAnything with external models
-python scripts/profile_memory_runtime.py \
-    --output_dir /path/to/results \
-    --external_models vggt vggt_omega pi3x must3r
+### Third-party frameworks
 
-# Custom view counts
-python scripts/profile_memory_runtime.py \
-    --output_dir /path/to/results \
-    --num_views 2 4 8 16 32 64
-```
+- **MapAnything:** the upstream [MapAnything](https://github.com/facebookresearch/map-anything) framework provides the reconstruction model and broad training/data-processing infrastructure. The project calls `MapAnything.from_pretrained("facebook/map-anything")` for camera-frame pseudo-label reconstruction; MapAnything is not claimed as original project work.
+- **Scal3R:** [`Scal3R/`](Scal3R/README.md) is a separately vendored large-scale reconstruction project. It has its own code/docs and is not directly called by the hazard scripts.
+- **RF-DETR:** the 2D component depends on external `RFDETRSegSmall` software and a checkpoint not distributed here.
+- **Other adapters:** the MapAnything tree includes research integrations for VGGT, DUSt3R, MASt3R, MUSt3R, Pi3, MoGe, AnyCalib, and others. Their presence does not make them components of this road-hazard model.
 
-**Available external models:** `vggt`, `pi3`, `pi3x`, `dust3r`, `mast3r`, `must3r`, `pow3r`, `pow3r_ba`, `da3`, `da3_nested`, `moge_1`, `moge_2`
+The upstream MapAnything distribution acknowledges [DUSt3R](https://github.com/naver/dust3r), [MASt3R](https://github.com/naver/mast3r), [RayDiffusion](https://github.com/jasonyzhang/RayDiffusion), [MoGe](https://github.com/microsoft/moge), [VGGSfM](https://github.com/facebookresearch/vggsfm), [VGGT](https://github.com/facebookresearch/vggt), [MaRePo](https://github.com/nianticlabs/marepo), and [DINOv2](https://github.com/facebookresearch/dinov2). MapAnything’s WAI/UniCeption data and training infrastructure remains in this repository under its upstream terms.
 
-### Command-Line Arguments
+### Licensing
 
-| Argument | Description | Default |
-|----------|-------------|---------|
-| `--output_dir` | Directory to save results | Required |
-| `--num_views` | List of view counts to profile | 2 4 8 16 24 32 50 100 200 500 1000 |
-| `--external_models` | External model names to compare | None |
-| `--mapanything_checkpoint` | Path to MapAnything checkpoint | None (uses HuggingFace) |
-| `--apache` | Use Apache 2.0 licensed model | False |
-| `--warmup_runs` | Number of warmup iterations | 3 |
-| `--timed_runs` | Number of timed iterations | 5 |
-| `--skip_mem_efficient` | Skip memory-efficient mode profiling | False |
+The root [`LICENSE`](LICENSE) contains Apache License 2.0 text for the supplied MapAnything distribution. `Scal3R/` has a separate [MIT licence](Scal3R/LICENSE). External models, checkpoints, datasets, and integrations may have independent conditions; consult their original repositories/model cards before redistribution or commercial use. This README does not assert one licence for all third-party assets.
 
-### Output Files
-
-The script generates the following outputs in the specified directory:
-
-- `profiling_results.json`: Raw profiling data with memory and timing statistics
-- `profiling_memory.png`: Plot of peak GPU memory usage vs number of views
-- `profiling_speed.png`: Plot of inference frequency (Hz) vs number of views
-
-## COLMAP & GSplat Support
-
-MapAnything predictions can be exported to COLMAP format for use with Gaussian Splatting and other downstream applications.
-
-### Exporting to COLMAP Format
-
-MapAnything's predictions can directly be converted to COLMAP format by using:
-
-```bash
-# Install requirements for this specific demo
-pip install -e ".[colmap]"
-
-# Export MapAnything predictions to COLMAP format
-python scripts/demo_colmap.py --images_dir=/YOUR/IMAGES_DIR/ --output_dir=/YOUR/OUTPUT_DIR/
-
-# With custom voxel fraction (default: 0.01 = 1% of IQR-based scene extent)
-python scripts/demo_colmap.py --images_dir=/YOUR/IMAGES_DIR/ --output_dir=/YOUR/OUTPUT_DIR/ --voxel_fraction=0.002
-
-# With explicit voxel size in meters (overrides --voxel_fraction)
-python scripts/demo_colmap.py --images_dir=/YOUR/IMAGES_DIR/ --output_dir=/YOUR/OUTPUT_DIR/ --voxel_size=0.01
-
-# Use Apache 2.0 licensed model
-python scripts/demo_colmap.py --images_dir=/YOUR/IMAGES_DIR/ --output_dir=/YOUR/OUTPUT_DIR/ --apache
-
-# Also save dense reconstruction as GLB file
-python scripts/demo_colmap.py --images_dir=/YOUR/IMAGES_DIR/ --output_dir=/YOUR/OUTPUT_DIR/ --save_glb
-
-# Skip Point2D backprojection for faster export
-python scripts/demo_colmap.py --images_dir=/YOUR/IMAGES_DIR/ --output_dir=/YOUR/OUTPUT_DIR/ --skip_point2d
-```
-
-The output is a self-contained COLMAP reconstruction with processed images (at model inference resolution) and camera parameters:
-
-```
-OUTPUT_DIR/
-├── images/           # Processed images (matching intrinsics resolution)
-│   ├── img1.jpg
-│   └── img2.jpg
-└── sparse/
-    ├── cameras.bin
-    ├── images.bin
-    ├── points3D.bin
-    └── points.ply
-```
-
-### Visualizing COLMAP Reconstruction in Rerun
-
-You can visualize the exported COLMAP reconstruction using Rerun:
-
-```bash
-# Terminal 1: Start the Rerun server
-rerun --serve --port 2004 --web-viewer-port 2006
-
-# Terminal 2: Visualize the COLMAP reconstruction
-python scripts/visualize_colmap_format_in_rerun.py --scene_dir=/YOUR/OUTPUT_DIR/ --connect
-
-# With images and keypoints
-python scripts/visualize_colmap_format_in_rerun.py --scene_dir=/YOUR/OUTPUT_DIR/ --show_images --show_keypoints --connect
-
-# Filter noisy points (by track length, primarily useful for traditional SfM outputs)
-python scripts/visualize_colmap_format_in_rerun.py --scene_dir=/YOUR/OUTPUT_DIR/ --filter --min_track_length=4 --connect
-
-# Terminal 3 or Local Machine: Open web viewer at http://127.0.0.1:2006
-```
-
-Optionally, if Rerun is installed locally, the local Rerun viewer can be spawned using: `rerun --connect rerun+http://127.0.0.1:2004/proxy`.
-
-### Integration with Gaussian Splatting
-
-The exported COLMAP files can be directly used with [gsplat](https://github.com/nerfstudio-project/gsplat) for Gaussian Splatting training. Install `gsplat` following their official instructions (we recommend `gsplat==1.3.0`):
-
-An example command to train the model is:
-```
-cd <path_to_gsplat>
-python examples/simple_trainer.py  default --data_factor 1 --data_dir /YOUR/OUTPUT_DIR/ --result_dir /YOUR/RESULT_DIR/
-```
-
-## Data Processing for Training & Benchmarking
-
-We provide details in the [Data Processing README](data_processing/README.md).
-
-## Training
-
-We provide comprehensive training instructions, scripts, and configurations to reproduce MapAnything and train custom models. See [Training README](train.md) for detailed training instructions, including:
-- Data setup and processing for all 13 training datasets used in the paper
-- Quick start examples with memory optimization tips
-- All main model and ablation training scripts from the paper
-- Fine-tuning support for other geometry estimation models like MoGe-2, VGGT, VGGT-Omega, π³ showcasing the modularity of our framework
-
-## Benchmarking
-
-We provide comprehensive benchmarking scripts and instructions for evaluating MapAnything across multiple tasks and datasets. All original bash scripts used for benchmarking are available in the `/bash_scripts/benchmarking/` folder.
-
-### Available Benchmarks
-
-1. **Dense Up-to-N-View Reconstruction Benchmark**
-   See [Dense Up-to-N-View Benchmark README](benchmarking/dense_n_view/README.md) for detailed instructions on evaluating dense multi-view metric reconstruction.
-
-2. **Single-View Image Calibration Benchmark**
-   See [Calibration Benchmark README](benchmarking/calibration/README.md) for detailed instructions on evaluating camera intrinsic prediction from single images.
-
-3. **RobustMVD Benchmark**
-   See [RMVD Benchmark README](benchmarking/rmvd_mvs_benchmark/README.md) for detailed instructions on using the RobustMVD benchmark.
-
-## Code License
-
-This code is licensed under an open-source [Apache 2.0 license](LICENSE).
-
-## Models
-
-We release **two variants** of the pre-trained MapAnything models on Hugging Face Hub, each with different licensing based on the underlying training datasets:
-
-### 🤗 Hugging Face Hub Models
-
-1. **[facebook/map-anything](https://huggingface.co/facebook/map-anything)** (CC-BY-NC 4.0 License)
-2. **[facebook/map-anything-apache](https://huggingface.co/facebook/map-anything-apache)** (Apache 2.0 License)
-
-### 🤗 Hugging Face Hub Models used for V1 Release in September 2025
-
-1. **[facebook/map-anything-v1](https://huggingface.co/facebook/map-anything-v1)** (CC-BY-NC 4.0 License)
-2. **[facebook/map-anything-apache-v1](https://huggingface.co/facebook/map-anything-apache-v1)** (Apache 2.0 License)
-
-### Model Selection Guide
-
-- **For Research & Academic Use**: Use `facebook/map-anything` for the best performance
-- **For Commercial Use**: Use `facebook/map-anything-apache` for commercial-friendly licensing
-
-Both models support the same API and functionality. The only difference is the training data composition and resulting license terms. Please see our paper for detailed information about the specific datasets used in each model variant.
-
-### Optional Checkpoint Conversion
-
-The MapAnything training/benchmarking framework expects trained checkpoints in a specific format with a `model` key. The HuggingFace checkpoints can be easily converted to the expected format using:
-
-```bash
-# Convert default CC-BY-NC model
-python scripts/convert_hf_to_benchmark_checkpoint.py \
-    --output_path checkpoints/facebook_map-anything.pth
-
-# Convert Apache 2.0 model for commercial use
-python scripts/convert_hf_to_benchmark_checkpoint.py \
-    --apache \
-    --output_path checkpoints/facebook_map-anything-apache.pth
-```
-
-## Building Blocks for MapAnything
-
-UniCeption & WorldAI (WAI) Data are two crucial building blocks and have been developed for ease of use by the community:
-
-🌍 [UniCeption](https://github.com/castacks/UniCeption/tree/main) is a library which contains modular, config-swappable components for assembling end-to-end networks.
-
-🌍 [WAI](./data_processing/README.md) is a unified data format for all things 3D, 4D & Spatial AI. It enables easy, scalable and reproducible data processing.
-
-We strongly encourage the community to build on top of the tools and submit PRs! This also enables us to release stronger models (both apache and research use) as the community adds more datasets to WAI and builds on top of UniCeption/MapAnything.
-
-### Related Research
-
-Check out our related work which also use UniCeption & WAI:
-
-🚀 [UFM: A Simple Path towards Unified Dense Correspondence with Flow](https://uniflowmatch.github.io/)
-
-🚀 [FlowR: Flowing from Sparse to Dense 3D Reconstructions](https://tobiasfshr.github.io/pub/flowr/)
-
-## Acknowledgments
-
-We thank the following projects for their open-source code: [DUSt3R](https://github.com/naver/dust3r), [MASt3R](https://github.com/naver/mast3r), [RayDiffusion](https://github.com/jasonyzhang/RayDiffusion), [MoGe](https://github.com/microsoft/moge), [VGGSfM](https://github.com/facebookresearch/vggsfm), [VGGT](https://github.com/facebookresearch/vggt), [MaRePo](https://github.com/nianticlabs/marepo), and [DINOv2](https://github.com/facebookresearch/dinov2).
-
-## Citation
-
-If you find our repository useful, please consider giving it a star ⭐ and citing our paper in your work:
+### References
 
 ```bibtex
 @inproceedings{keetha2026mapanything,
@@ -873,4 +331,14 @@ If you find our repository useful, please consider giving it a star ⭐ and citi
   year={2026},
   organization={IEEE}
 }
+
+@misc{xie2026scal3rscalabletesttimetraining,
+  title={Scal3R: Scalable Test-Time Training for Large-Scale 3D Reconstruction},
+  author={Xie, Tao and Yang, Peishan and Jin, Yudong and others},
+  year={2026},
+  eprint={2604.08542},
+  archivePrefix={arXiv}
+}
 ```
+
+See the upstream [MapAnything repository](https://github.com/facebookresearch/map-anything) and [Scal3R README](Scal3R/README.md) for complete framework documentation, acknowledgements, and citations.
