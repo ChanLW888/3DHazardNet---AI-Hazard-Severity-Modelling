@@ -1,36 +1,44 @@
+
 #!/usr/bin/env python3
-
 """
-Generate ONE high-resolution semantic 3D voxel map for EVERY image in CAM2 and CAM6.
+Generate independent semantic voxel NPZ files for CAM2 and CAM6.
 
-NEW ROI:
-    X = -8.0 .. 8.0 m
-    Y =  0.0 .. 2.0 m
-    Z =  0.25 .. 10.0 m
+Pipeline:
+    RGB + LiDAR
+       |-- RF-DETR -> semantic segmentation
+       |-- MapAnything -> camera-relative 3D points
+       |-- Voxelisation -> semantic + occupancy
+       |-- Compressed NPZ
 
-Voxel size:
-    0.05 m (5 cm)
+Timing:
+    - Individual time for every generated NPZ
+    - Image loading
+    - LiDAR loading
+    - RF-DETR inference + segmentation
+    - MapAnything inference + preprocessing
+    - Voxelisation
+    - NPZ compression / saving
+    - Total end-to-end NPZ generation time
+    - CSV log and overall statistics
 
-Grid:
-    320 x 40 x 195
-    = 2,496,000 voxels per image
-
-Every image is processed independently.
-CAM2 and CAM6 are never merged.
-LiDAR is used as sparse depth input to MapAnything.
-RF-DETR provides the 2D semantic labels.
-MapAnything pts3d_cam is camera-relative.
+Run:
+    python -u generate_semantic_voxels.py
+    python -u generate_semantic_voxels.py --limit 10
+    python -u generate_semantic_voxels.py --camera CAM2
+    python -u generate_semantic_voxels.py --overwrite --limit 5
 """
 
+import argparse
 import csv
+import time
 from pathlib import Path
 
 import cv2
 import numpy as np
 import torch
 from PIL import Image
-from rfdetr import RFDETRSegSmall
 
+from rfdetr import RFDETRSegSmall
 from mapanything.models import MapAnything
 from mapanything.utils.image import preprocess_inputs
 
@@ -45,6 +53,7 @@ BAG_ROOT = Path(
 )
 
 EXTRACTED = BAG_ROOT / "extracted"
+OUTPUT_DIR = BAG_ROOT / "semantic_voxels_new_roi_5cm"
 
 CAMERAS = ["CAM2", "CAM6"]
 
@@ -54,22 +63,12 @@ LIDAR_MAX_RANGE = 50.0
 LIDAR_MIN_CAMERA_DEPTH = 0.05
 BORDER_MARGIN_PIXELS = 2
 
+VOXEL_SIZE = 0.05
 
-# ============================================================
-# VOXEL GRID
-# ============================================================
-
-VOXEL_SIZE = 0.05  # 5 cm
-
-# NEW ROI
 X_MIN, X_MAX = -8.0, 8.0
 Y_MIN, Y_MAX = 0.0, 2.0
 Z_MIN, Z_MAX = 0.25, 10.0
 
-# Expected grid:
-# X: 16.00 / 0.05 = 320
-# Y:  2.00 / 0.05 = 40
-# Z:  9.75 / 0.05 = 195
 EXPECTED_GRID_SHAPE = (320, 40, 195)
 
 EXPECTED_GRID_BOUNDS = (
@@ -77,13 +76,6 @@ EXPECTED_GRID_BOUNDS = (
     0.0, 2.0,
     0.25, 10.0,
 )
-
-OUTPUT_DIR = BAG_ROOT / "semantic_voxels_new_roi_5cm"
-
-
-# ============================================================
-# RF-DETR
-# ============================================================
 
 RFDETR_MODEL_PATH = Path(
     "/home/lcha0115/bt60_scratch/lcha_data/"
@@ -94,7 +86,6 @@ RFDETR_MODEL_PATH = Path(
 
 RFDETR_CONFIDENCE_THRESHOLD = 0.30
 
-# RF-DETR dataset IDs
 CLASS_NAMES = {
     0: "fallen_fence",
     1: "loose_trash",
@@ -103,9 +94,6 @@ CLASS_NAMES = {
     4: "sidewalk",
 }
 
-# Output voxel IDs
-# 0 = background
-# 1..5 = hazard classes
 OUTPUT_CLASS_IDS = {
     0: 1,
     1: 2,
@@ -126,14 +114,13 @@ OUTPUT_CLASS_NAMES = np.array(
     dtype="<U32",
 )
 
-
 DEVICE = torch.device(
     "cuda" if torch.cuda.is_available() else "cpu"
 )
 
 
 # ============================================================
-# LiDAR -> CAMERA EXTRINSICS
+# EXTRINSICS
 # ============================================================
 
 LIDAR_TO_CAMERA = {
@@ -154,6 +141,137 @@ LIDAR_TO_CAMERA = {
 
 
 # ============================================================
+# TIMING HELPERS
+# ============================================================
+
+def sync_gpu():
+    """Synchronise GPU before reading elapsed time."""
+    if DEVICE.type == "cuda":
+        torch.cuda.synchronize()
+
+
+class Timer:
+    """Accurate elapsed wall-clock timer, including GPU work."""
+
+    def __enter__(self):
+        sync_gpu()
+        self.start = time.perf_counter()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        sync_gpu()
+        self.elapsed = time.perf_counter() - self.start
+
+
+TIMING_FIELDS = [
+    "camera",
+    "timestamp",
+    "npz_path",
+    "image_loading_s",
+    "lidar_loading_s",
+    "rfdetr_s",
+    "mapanything_s",
+    "voxelisation_s",
+    "npz_saving_s",
+    "other_s",
+    "total_s",
+    "occupied_voxels",
+    "hazard_voxels",
+]
+
+
+def print_timing(timings, running_average, processed):
+    print("\n  GENERATION TIMING")
+    print("  " + "-" * 47)
+
+    labels = [
+        ("Image loading", "image_loading_s"),
+        ("LiDAR loading", "lidar_loading_s"),
+        ("RF-DETR", "rfdetr_s"),
+        ("MapAnything", "mapanything_s"),
+        ("Voxelisation", "voxelisation_s"),
+        ("NPZ saving", "npz_saving_s"),
+        ("Other overhead", "other_s"),
+    ]
+
+    for label, key in labels:
+        print(f"  {label:<22} {timings[key]:>10.3f} s")
+
+    print("  " + "-" * 47)
+    print(f"  {'TOTAL NPZ TIME':<22} {timings['total_s']:>10.3f} s")
+    print(f"  {'Running average':<22} {running_average:>10.3f} s/NPZ")
+    print(f"  {'Completed':<22} {processed:>10,} NPZ")
+
+
+def print_summary(records, wall_time, skipped, failed):
+    print("\n" + "=" * 80)
+    print("GENERATION SUMMARY")
+    print("=" * 80)
+
+    print(f"Generated: {len(records):,}")
+    print(f"Skipped:   {skipped:,}")
+    print(f"Failed:    {failed:,}")
+
+    if not records:
+        print("No new NPZ files were generated.")
+        return
+
+    totals = np.array(
+        [r["total_s"] for r in records],
+        dtype=np.float64,
+    )
+
+    print("\nPER-NPZ GENERATION TIME")
+    print(f"  Average:  {np.mean(totals):.3f} s")
+    print(f"  Median:   {np.median(totals):.3f} s")
+    print(f"  Minimum:  {np.min(totals):.3f} s")
+    print(f"  Maximum:  {np.max(totals):.3f} s")
+    print(f"  Std dev:  {np.std(totals):.3f} s")
+    print(f"  P95:      {np.percentile(totals, 95):.3f} s")
+
+    print("\nAVERAGE TIME BREAKDOWN")
+
+    keys = [
+        ("Image loading", "image_loading_s"),
+        ("LiDAR loading", "lidar_loading_s"),
+        ("RF-DETR", "rfdetr_s"),
+        ("MapAnything", "mapanything_s"),
+        ("Voxelisation", "voxelisation_s"),
+        ("NPZ saving", "npz_saving_s"),
+        ("Other", "other_s"),
+    ]
+
+    for label, key in keys:
+        avg = np.mean([r[key] for r in records])
+        percentage = 100.0 * avg / np.mean(totals)
+        print(f"  {label:<20} {avg:8.3f} s  ({percentage:5.1f}%)")
+
+    print("\nBY CAMERA")
+
+    for camera in CAMERAS:
+        values = [
+            r["total_s"]
+            for r in records
+            if r["camera"] == camera
+        ]
+
+        if values:
+            print(
+                f"  {camera}: {len(values):,} files, "
+                f"mean={np.mean(values):.3f} s, "
+                f"median={np.median(values):.3f} s"
+            )
+
+    processing_time = float(np.sum(totals))
+
+    print("\nTHROUGHPUT")
+    print(f"  Generation time: {processing_time:.2f} s")
+    print(f"  Full run time:    {wall_time:.2f} s")
+    print(f"  Generation rate:  {len(records)/processing_time:.3f} NPZ/s")
+    print(f"  Including setup:  {len(records)/wall_time:.3f} NPZ/s")
+
+
+# ============================================================
 # CALIBRATION / FILES
 # ============================================================
 
@@ -169,8 +287,7 @@ def parse_array(value):
         value = value.replace(wrapper, "")
 
     value = (
-        value
-        .replace(")", "")
+        value.replace(")", "")
         .replace("[", "")
         .replace("]", "")
         .replace(",", " ")
@@ -183,9 +300,7 @@ def parse_array(value):
     )
 
     if values.size == 0:
-        raise RuntimeError(
-            f"Could not parse array: {value}"
-        )
+        raise RuntimeError(f"Could not parse array: {value}")
 
     return values
 
@@ -197,18 +312,13 @@ def load_intrinsics(camera):
         rows = list(csv.DictReader(f))
 
     if not rows:
-        raise RuntimeError(
-            f"No camera info found: {path}"
-        )
+        raise RuntimeError(f"No camera info found: {path}")
 
     row = rows[0]
-
     P = parse_array(row["P"])
 
     if P.size != 12:
-        raise RuntimeError(
-            f"{camera}: invalid P size {P.size}"
-        )
+        raise RuntimeError(f"{camera}: invalid P size {P.size}")
 
     K = P.reshape(3, 4)[:, :3]
 
@@ -217,7 +327,6 @@ def load_intrinsics(camera):
 
 def load_images(camera):
     directory = EXTRACTED / camera / "images_rect"
-
     records = []
 
     for path in directory.glob("*.png"):
@@ -231,16 +340,13 @@ def load_images(camera):
     records.sort(key=lambda x: x[0])
 
     if not records:
-        raise RuntimeError(
-            f"No images found: {directory}"
-        )
+        raise RuntimeError(f"No images found: {directory}")
 
     return records
 
 
 def load_lidar_files():
     directory = EXTRACTED / "lidar"
-
     records = []
 
     for path in directory.glob("*.ply"):
@@ -254,9 +360,7 @@ def load_lidar_files():
     records.sort(key=lambda x: x[0])
 
     if not records:
-        raise RuntimeError(
-            f"No LiDAR files found: {directory}"
-        )
+        raise RuntimeError(f"No LiDAR files found: {directory}")
 
     return records
 
@@ -267,10 +371,7 @@ def nearest_timestamp(target, records):
         dtype=np.int64,
     )
 
-    index = int(
-        np.searchsorted(timestamps, target)
-    )
-
+    index = int(np.searchsorted(timestamps, target))
     candidates = []
 
     if index > 0:
@@ -284,9 +385,7 @@ def nearest_timestamp(target, records):
 
     best = min(
         candidates,
-        key=lambda i: abs(
-            int(records[i][0]) - int(target)
-        ),
+        key=lambda i: abs(int(records[i][0]) - int(target)),
     )
 
     timestamp = int(records[best][0])
@@ -310,9 +409,7 @@ def load_ascii_ply(path):
             line = f.readline()
 
             if not line:
-                raise RuntimeError(
-                    f"Unexpected EOF: {path}"
-                )
+                raise RuntimeError(f"Unexpected EOF: {path}")
 
             line = line.strip()
             header.append(line)
@@ -320,7 +417,17 @@ def load_ascii_ply(path):
             if line == "end_header":
                 break
 
+    if not header or header[0] != "ply":
+        raise RuntimeError(f"Invalid PLY header: {path}")
+
+    if "format ascii 1.0" not in header:
+        raise RuntimeError(
+            f"Only ASCII PLY is supported: {path}"
+        )
+
     vertex_count = None
+    properties = []
+    in_vertex = False
 
     for line in header:
         parts = line.split()
@@ -331,24 +438,6 @@ def load_ascii_ply(path):
             and parts[1] == "vertex"
         ):
             vertex_count = int(parts[2])
-            break
-
-    if vertex_count is None:
-        raise RuntimeError(
-            f"No vertex count found: {path}"
-        )
-
-    properties = []
-    in_vertex = False
-
-    for line in header:
-        parts = line.split()
-
-        if (
-            len(parts) >= 3
-            and parts[0] == "element"
-            and parts[1] == "vertex"
-        ):
             in_vertex = True
             continue
 
@@ -366,14 +455,18 @@ def load_ascii_ply(path):
         ):
             break
 
+    if vertex_count is None:
+        raise RuntimeError(f"No vertex count: {path}")
+
+    if vertex_count == 0:
+        return np.empty((0, len(properties))), properties
+
     data = np.loadtxt(
         path,
         skiprows=len(header),
         max_rows=vertex_count,
+        ndmin=2,
     )
-
-    if data.ndim == 1:
-        data = data.reshape(1, -1)
 
     return data, properties
 
@@ -390,40 +483,29 @@ def load_lidar_ply(path):
         ],
     ].astype(np.float64)
 
+    valid = np.isfinite(xyz).all(axis=1)
     ranges = np.linalg.norm(xyz, axis=1)
 
-    return xyz[
-        ranges <= LIDAR_MAX_RANGE
-    ]
+    return xyz[valid & (ranges <= LIDAR_MAX_RANGE)]
 
 
 # ============================================================
-# LiDAR DEPTH
+# LIDAR DEPTH
 # ============================================================
 
 def transform_points(points, T):
     homogeneous = np.concatenate(
         [
             points,
-            np.ones(
-                (len(points), 1)
-            ),
+            np.ones((len(points), 1)),
         ],
         axis=1,
     )
 
-    return (
-        homogeneous @ T.T
-    )[:, :3]
+    return (homogeneous @ T.T)[:, :3]
 
 
-def project_lidar(
-    points,
-    camera,
-    K,
-    width,
-    height,
-):
+def project_lidar(points, camera, K, width, height):
     camera_points = transform_points(
         points,
         LIDAR_TO_CAMERA[camera],
@@ -450,13 +532,11 @@ def project_lidar(
         )
 
     u = np.rint(
-        K[0, 0] * X / Z
-        + K[0, 2]
+        K[0, 0] * X / Z + K[0, 2]
     ).astype(np.intp)
 
     v = np.rint(
-        K[1, 1] * Y / Z
-        + K[1, 2]
+        K[1, 1] * Y / Z + K[1, 2]
     ).astype(np.intp)
 
     inside = (
@@ -466,11 +546,7 @@ def project_lidar(
         & (v < height - BORDER_MARGIN_PIXELS)
     )
 
-    return (
-        u[inside],
-        v[inside],
-        Z[inside],
-    )
+    return u[inside], v[inside], Z[inside]
 
 
 def lidar_depth_image(
@@ -481,11 +557,7 @@ def lidar_depth_image(
     height,
 ):
     u, v, depths = project_lidar(
-        points,
-        camera,
-        K,
-        width,
-        height,
+        points, camera, K, width, height
     )
 
     depth = np.zeros(
@@ -496,34 +568,19 @@ def lidar_depth_image(
     if len(u) == 0:
         return depth
 
-    pixel_ids = (
-        v.astype(np.int64) * width
-        + u.astype(np.int64)
-    )
+    pixel_ids = v.astype(np.int64) * width + u.astype(np.int64)
 
-    order = np.lexsort(
-        (depths, pixel_ids)
-    )
-
+    order = np.lexsort((depths, pixel_ids))
     sorted_pixels = pixel_ids[order]
 
-    keep = np.ones(
-        len(order),
-        dtype=bool,
-    )
+    keep = np.ones(len(order), dtype=bool)
 
     if len(order) > 1:
-        keep[1:] = (
-            sorted_pixels[1:]
-            != sorted_pixels[:-1]
-        )
+        keep[1:] = sorted_pixels[1:] != sorted_pixels[:-1]
 
     selected = order[keep]
 
-    depth[
-        v[selected],
-        u[selected],
-    ] = depths[selected].astype(
+    depth[v[selected], u[selected]] = depths[selected].astype(
         np.float32
     )
 
@@ -534,71 +591,42 @@ def lidar_depth_image(
 # RF-DETR
 # ============================================================
 
-def normalise_rfdetr_mask(
-    mask,
-    image_height,
-    image_width,
-):
+def normalise_rfdetr_mask(mask, image_height, image_width):
     if torch.is_tensor(mask):
-        mask = (
-            mask
-            .detach()
-            .cpu()
-            .numpy()
-        )
+        mask = mask.detach().cpu().numpy()
 
-    mask = np.asarray(mask)
-    mask = np.squeeze(mask)
+    mask = np.squeeze(np.asarray(mask))
 
     if mask.dtype != np.bool_:
         mask = mask > 0.5
 
     if mask.ndim != 2:
         raise ValueError(
-            f"Unexpected RF-DETR mask shape: "
-            f"{mask.shape}"
+            f"Unexpected RF-DETR mask shape: {mask.shape}"
         )
 
-    if mask.shape != (
-        image_height,
-        image_width,
-    ):
+    if mask.shape != (image_height, image_width):
         mask = cv2.resize(
             mask.astype(np.uint8),
-            (
-                image_width,
-                image_height,
-            ),
+            (image_width, image_height),
             interpolation=cv2.INTER_NEAREST,
         ).astype(bool)
 
     return mask
 
 
-def run_rfdetr_segmentation(
-    model,
-    image,
-):
+def run_rfdetr_segmentation(model, image):
     image_bgr = cv2.cvtColor(
         image,
         cv2.COLOR_RGB2BGR,
     )
 
     with torch.inference_mode():
-        detections_batch = model.predict(
-            [image_bgr]
-        )
+        detections = model.predict([image_bgr])[0]
 
-    detections = detections_batch[0]
+    image_height, image_width = image.shape[:2]
 
-    image_height, image_width = (
-        image.shape[:2]
-    )
-
-    if not hasattr(
-        detections,
-        "mask",
-    ):
+    if not hasattr(detections, "mask"):
         raise RuntimeError(
             "RF-DETR returned no segmentation masks."
         )
@@ -607,37 +635,30 @@ def run_rfdetr_segmentation(
     class_ids = detections.class_id
     confidences = detections.confidence
 
-    ordered = sorted(
-        range(len(class_ids)),
-        key=lambda i: float(
-            confidences[i]
-        ),
-        reverse=True,
-    )
-
     point_class = np.full(
-        (
-            image_height,
-            image_width,
-        ),
+        (image_height, image_width),
         -1,
         dtype=np.int16,
     )
 
+    if masks is None:
+        if len(class_ids) > 0:
+            raise RuntimeError(
+                "RF-DETR detections exist but masks are None."
+            )
+        return point_class
+
+    ordered = sorted(
+        range(len(class_ids)),
+        key=lambda i: float(confidences[i]),
+        reverse=True,
+    )
+
     for detection_index in ordered:
+        confidence = float(confidences[detection_index])
+        class_id = int(class_ids[detection_index])
 
-        confidence = float(
-            confidences[detection_index]
-        )
-
-        class_id = int(
-            class_ids[detection_index]
-        )
-
-        if (
-            confidence
-            < RFDETR_CONFIDENCE_THRESHOLD
-        ):
+        if confidence < RFDETR_CONFIDENCE_THRESHOLD:
             continue
 
         if class_id not in CLASS_NAMES:
@@ -649,11 +670,7 @@ def run_rfdetr_segmentation(
             image_width,
         )
 
-        assign = (
-            mask
-            & (point_class == -1)
-        )
-
+        assign = mask & (point_class == -1)
         point_class[assign] = class_id
 
     return point_class
@@ -682,21 +699,15 @@ def run_mapanything_single(
 
     view = {
         "img": image,
-        "intrinsics": K.astype(
-            np.float32
-        ),
-        "depth_z": torch.from_numpy(
-            depth
-        ).float(),
+        "intrinsics": K.astype(np.float32),
+        "depth_z": torch.from_numpy(depth).float(),
         "is_metric_scale": torch.tensor(
             [True],
             device=DEVICE,
         ),
     }
 
-    processed = preprocess_inputs(
-        [view]
-    )
+    processed = preprocess_inputs([view])
 
     with torch.no_grad():
         predictions = model.infer(
@@ -725,7 +736,6 @@ def run_mapanything_single(
 
     prediction = predictions[0]
 
-    # Camera-relative 3D coordinates
     points = (
         prediction["pts3d_cam"]
         .detach()
@@ -733,46 +743,26 @@ def run_mapanything_single(
         .numpy()
     )
 
-    while (
-        points.ndim > 3
-        and points.shape[0] == 1
-    ):
+    while points.ndim > 3 and points.shape[0] == 1:
         points = points[0]
 
-    if (
-        points.ndim != 3
-        or points.shape[-1] != 3
-    ):
+    if points.ndim != 3 or points.shape[-1] != 3:
         raise RuntimeError(
-            f"Unexpected pts3d_cam shape: "
-            f"{points.shape}"
+            f"Unexpected pts3d_cam shape: {points.shape}"
         )
 
     h, w = points.shape[:2]
-
     mask = prediction.get("mask")
 
     if mask is None:
-        valid_mask = np.ones(
-            (h, w),
-            dtype=bool,
-        )
-
+        valid_mask = np.ones((h, w), dtype=bool)
     else:
         valid_mask = np.squeeze(
-            mask.detach()
-            .cpu()
-            .numpy()
+            mask.detach().cpu().numpy()
         ).astype(bool)
 
-        if valid_mask.shape != (
-            h,
-            w,
-        ):
-            valid_mask = np.ones(
-                (h, w),
-                dtype=bool,
-            )
+        if valid_mask.shape != (h, w):
+            valid_mask = np.ones((h, w), dtype=bool)
 
     return points, valid_mask, (h, w)
 
@@ -782,136 +772,58 @@ def run_mapanything_single(
 # ============================================================
 
 def voxel_grid_shape():
-    nx = int(
-        np.ceil(
-            (X_MAX - X_MIN)
-            / VOXEL_SIZE
-        )
+    return (
+        int(np.ceil((X_MAX - X_MIN) / VOXEL_SIZE)),
+        int(np.ceil((Y_MAX - Y_MIN) / VOXEL_SIZE)),
+        int(np.ceil((Z_MAX - Z_MIN) / VOXEL_SIZE)),
     )
-
-    ny = int(
-        np.ceil(
-            (Y_MAX - Y_MIN)
-            / VOXEL_SIZE
-        )
-    )
-
-    nz = int(
-        np.ceil(
-            (Z_MAX - Z_MIN)
-            / VOXEL_SIZE
-        )
-    )
-
-    return nx, ny, nz
 
 
 def validate_voxel_grid():
-
     shape = voxel_grid_shape()
 
     if shape != EXPECTED_GRID_SHAPE:
         raise RuntimeError(
-            f"Unexpected 5 cm voxel grid: "
-            f"{shape}; expected "
-            f"{EXPECTED_GRID_SHAPE}"
+            f"Unexpected grid shape {shape}; "
+            f"expected {EXPECTED_GRID_SHAPE}"
         )
 
-    if not np.isclose(
-        VOXEL_SIZE,
-        0.05,
-        atol=1e-12,
-    ):
-        raise RuntimeError(
-            f"Unexpected voxel size: "
-            f"{VOXEL_SIZE}; expected 0.05 m"
-        )
+    if not np.isclose(VOXEL_SIZE, 0.05, atol=1e-12):
+        raise RuntimeError("Voxel size must be 0.05 m")
 
-    actual_bounds = np.array(
-        [
-            X_MIN,
-            X_MAX,
-            Y_MIN,
-            Y_MAX,
-            Z_MIN,
-            Z_MAX,
-        ],
-        dtype=np.float64,
-    )
+    bounds = np.array([
+        X_MIN, X_MAX,
+        Y_MIN, Y_MAX,
+        Z_MIN, Z_MAX,
+    ])
 
-    expected_bounds = np.array(
+    if not np.allclose(
+        bounds,
         EXPECTED_GRID_BOUNDS,
-        dtype=np.float64,
-    )
-
-    if not np.allclose(
-        actual_bounds,
-        expected_bounds,
         atol=1e-12,
     ):
-        raise RuntimeError(
-            f"Bounds mismatch: "
-            f"actual={actual_bounds}, "
-            f"expected={expected_bounds}"
-        )
-
-    extent = np.array(
-        [
-            X_MAX - X_MIN,
-            Y_MAX - Y_MIN,
-            Z_MAX - Z_MIN,
-        ],
-        dtype=np.float64,
-    )
-
-    expected_extent = (
-        np.array(
-            shape,
-            dtype=np.float64,
-        )
-        * VOXEL_SIZE
-    )
-
-    if not np.allclose(
-        extent,
-        expected_extent,
-        atol=1e-8,
-    ):
-        raise RuntimeError(
-            f"Voxel geometry mismatch: "
-            f"bounds extent={extent}, "
-            f"shape*voxel_size="
-            f"{expected_extent}"
-        )
+        raise RuntimeError("Voxel bounds mismatch")
 
 
-def points_to_voxel_indices(
-    points,
-):
+def points_to_voxel_indices(points):
     ix = np.floor(
-        (points[:, 0] - X_MIN)
-        / VOXEL_SIZE
+        (points[:, 0] - X_MIN) / VOXEL_SIZE
     ).astype(np.int32)
 
     iy = np.floor(
-        (points[:, 1] - Y_MIN)
-        / VOXEL_SIZE
+        (points[:, 1] - Y_MIN) / VOXEL_SIZE
     ).astype(np.int32)
 
     iz = np.floor(
-        (points[:, 2] - Z_MIN)
-        / VOXEL_SIZE
+        (points[:, 2] - Z_MIN) / VOXEL_SIZE
     ).astype(np.int32)
 
     nx, ny, nz = voxel_grid_shape()
 
     inside = (
-        (ix >= 0)
-        & (ix < nx)
-        & (iy >= 0)
-        & (iy < ny)
-        & (iz >= 0)
-        & (iz < nz)
+        (ix >= 0) & (ix < nx)
+        & (iy >= 0) & (iy < ny)
+        & (iz >= 0) & (iz < nz)
     )
 
     return ix, iy, iz, inside
@@ -924,52 +836,31 @@ def build_semantic_voxel_map(
 ):
     h, w = points.shape[:2]
 
-    if segmentation_map.shape != (
-        h,
-        w,
-    ):
+    if segmentation_map.shape != (h, w):
         segmentation_map = cv2.resize(
-            segmentation_map.astype(
-                np.int16
-            ),
+            segmentation_map.astype(np.int16),
             (w, h),
             interpolation=cv2.INTER_NEAREST,
         )
 
     valid = (
         valid_mask
-        & np.isfinite(points).all(
-            axis=-1
-        )
+        & np.isfinite(points).all(axis=-1)
     )
 
-    flat_points = points[valid].astype(
-        np.float32
-    )
+    flat_points = points[valid].astype(np.float32)
+    flat_labels = segmentation_map[valid].astype(np.int16)
 
-    flat_labels = segmentation_map[
-        valid
-    ].astype(np.int16)
-
-    ix, iy, iz, inside = (
-        points_to_voxel_indices(
-            flat_points
-        )
+    ix, iy, iz, inside = points_to_voxel_indices(
+        flat_points
     )
 
     ix = ix[inside]
     iy = iy[inside]
     iz = iz[inside]
-
-    flat_labels = flat_labels[
-        inside
-    ]
+    flat_labels = flat_labels[inside]
 
     nx, ny, nz = voxel_grid_shape()
-
-    # -1 = unknown/unobserved
-    #  0 = observed point, no hazard
-    #  1..5 = hazard class
 
     semantic = np.full(
         (nx, ny, nz),
@@ -977,102 +868,65 @@ def build_semantic_voxel_map(
         dtype=np.int16,
     )
 
-    # 1 = at least one reconstructed
-    # point in this voxel
     occupancy = np.zeros(
         (nx, ny, nz),
         dtype=np.uint8,
     )
 
-    # Linear voxel index
-    voxel_linear = (
-        (ix * ny + iy) * nz
-        + iz
+    voxel_linear = (ix * ny + iy) * nz + iz
+
+    # Group reconstructed points by voxel.
+    # This replaces the original repeated full-array scan,
+    # while retaining majority-vote semantic assignment.
+    unique_voxels, inverse = np.unique(
+        voxel_linear,
+        return_inverse=True,
     )
 
-    unique_voxels = np.unique(
-        voxel_linear
+    if len(unique_voxels) == 0:
+        return semantic, occupancy
+
+    occupancy.reshape(-1)[unique_voxels] = 1
+
+    # Background class = 0.
+    # RF-DETR class IDs 0..4 map to output IDs 1..5.
+    output_labels = flat_labels.astype(np.int32) + 1
+
+    # Ignore points that have no detected class when voting.
+    hazard = (
+        (output_labels >= 1)
+        & (output_labels <= 5)
     )
 
-    for linear in unique_voxels:
+    # Efficient majority vote over 5 semantic classes.
+    counts = np.zeros(
+        (len(unique_voxels), 5),
+        dtype=np.int32,
+    )
 
-        selected = (
-            voxel_linear == linear
-        )
+    np.add.at(
+        counts,
+        (
+            inverse[hazard],
+            output_labels[hazard] - 1,
+        ),
+        1,
+    )
 
-        vx = int(
-            linear // (ny * nz)
-        )
+    has_hazard = counts.sum(axis=1) > 0
 
-        remainder = int(
-            linear % (ny * nz)
-        )
+    voxel_labels = np.zeros(
+        len(unique_voxels),
+        dtype=np.int16,
+    )
 
-        vy = remainder // nz
-        vz = remainder % nz
+    # np.argmax chooses the smallest class ID for ties,
+    # consistent with np.unique + np.argmax.
+    voxel_labels[has_hazard] = (
+        np.argmax(counts[has_hazard], axis=1) + 1
+    ).astype(np.int16)
 
-        occupancy[
-            vx,
-            vy,
-            vz,
-        ] = 1
-
-        labels = flat_labels[
-            selected
-        ]
-
-        # RF-DETR -1 means no detected
-        # hazard
-        hazard_labels = labels[
-            labels >= 0
-        ]
-
-        if len(hazard_labels) == 0:
-
-            semantic[
-                vx,
-                vy,
-                vz,
-            ] = 0
-
-            continue
-
-        output_labels = np.array(
-            [
-                OUTPUT_CLASS_IDS[
-                    int(label)
-                ]
-                for label in hazard_labels
-                if int(label)
-                in OUTPUT_CLASS_IDS
-            ],
-            dtype=np.int16,
-        )
-
-        if len(output_labels) == 0:
-
-            semantic[
-                vx,
-                vy,
-                vz,
-            ] = 0
-
-        else:
-
-            values, counts = np.unique(
-                output_labels,
-                return_counts=True,
-            )
-
-            semantic[
-                vx,
-                vy,
-                vz,
-            ] = int(
-                values[
-                    np.argmax(counts)
-                ]
-            )
+    semantic.reshape(-1)[unique_voxels] = voxel_labels
 
     return semantic, occupancy
 
@@ -1089,46 +943,68 @@ def save_voxel_map(
     timestamp,
     image_path,
 ):
-    path.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    path.parent.mkdir(parents=True, exist_ok=True)
 
     np.savez_compressed(
         path,
         semantic=semantic,
         occupancy=occupancy,
-        voxel_size=np.float32(
-            VOXEL_SIZE
-        ),
+        voxel_size=np.float32(VOXEL_SIZE),
         origin=np.array(
-            [
-                X_MIN,
-                Y_MIN,
-                Z_MIN,
-            ],
+            [X_MIN, Y_MIN, Z_MIN],
             dtype=np.float32,
         ),
         bounds=np.array(
             [
-                X_MIN,
-                X_MAX,
-                Y_MIN,
-                Y_MAX,
-                Z_MIN,
-                Z_MAX,
+                X_MIN, X_MAX,
+                Y_MIN, Y_MAX,
+                Z_MIN, Z_MAX,
             ],
             dtype=np.float32,
         ),
         camera=np.array(camera),
-        timestamp=np.int64(
-            timestamp
-        ),
-        image_path=np.array(
-            str(image_path)
-        ),
+        timestamp=np.int64(timestamp),
+        image_path=np.array(str(image_path)),
         class_names=OUTPUT_CLASS_NAMES,
     )
+
+
+# ============================================================
+# ARGUMENTS
+# ============================================================
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Generate semantic voxel NPZ files with timing."
+    )
+
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="Maximum number of newly generated NPZ files; 0=all.",
+    )
+
+    parser.add_argument(
+        "--camera",
+        choices=["CAM2", "CAM6", "both"],
+        default="both",
+    )
+
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Regenerate existing NPZ files.",
+    )
+
+    parser.add_argument(
+        "--timing-csv",
+        type=Path,
+        default=None,
+        help="Path for generation timing CSV.",
+    )
+
+    return parser.parse_args()
 
 
 # ============================================================
@@ -1136,91 +1012,61 @@ def save_voxel_map(
 # ============================================================
 
 def main():
+    args = parse_args()
 
-    print("=" * 80)
-    print(
-        "PER-IMAGE SEMANTIC VOXEL GENERATION"
+    if args.limit < 0:
+        raise ValueError("--limit must be >= 0")
+
+    selected_cameras = (
+        CAMERAS
+        if args.camera == "both"
+        else [args.camera]
     )
-    print("=" * 80)
 
-    print(f"Device: {DEVICE}")
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    timing_csv = (
+        args.timing_csv
+        if args.timing_csv is not None
+        else OUTPUT_DIR / "generation_times.csv"
+    )
+
+    timing_csv.parent.mkdir(parents=True, exist_ok=True)
+
+    run_start = time.perf_counter()
+
+    print("=" * 80)
+    print("SEMANTIC VOXEL GENERATION WITH PER-NPZ TIMING")
+    print("=" * 80)
+    print(f"Device:       {DEVICE}")
+    print(f"Cameras:      {selected_cameras}")
+    print(f"Output:       {OUTPUT_DIR}")
+    print(f"Timing CSV:   {timing_csv}")
+    print(f"Limit:        {args.limit or 'ALL'}")
+    print(f"Overwrite:    {args.overwrite}")
 
     if DEVICE.type == "cuda":
-        print(
-            f"GPU: "
-            f"{torch.cuda.get_device_name(0)}"
-        )
-
-    nx, ny, nz = voxel_grid_shape()
+        print(f"GPU: {torch.cuda.get_device_name(0)}")
 
     validate_voxel_grid()
 
-    print(
-        f"Voxel size: "
-        f"{VOXEL_SIZE:.3f} m (5 cm)"
-    )
+    nx, ny, nz = voxel_grid_shape()
 
     print(
-        f"Voxel grid: "
-        f"{nx} x {ny} x {nz}"
+        f"Voxel grid: {nx} x {ny} x {nz} "
+        f"= {nx * ny * nz:,} voxels"
     )
-
-    print(
-        f"Total voxels per image: "
-        f"{nx * ny * nz:,}"
-    )
-
-    print(
-        f"Bounds: "
-        f"X={X_MIN}..{X_MAX}, "
-        f"Y={Y_MIN}..{Y_MAX}, "
-        f"Z={Z_MIN}..{Z_MAX}"
-    )
-
-    print(
-        f"Expected grid shape: "
-        f"{EXPECTED_GRID_SHAPE}"
-    )
-
-    print(
-        f"Output directory: "
-        f"{OUTPUT_DIR}"
-    )
-
-    print()
-
-    print("IMPORTANT:")
-    print(
-        "  Every image is processed independently."
-    )
-    print(
-        "  MapAnything receives ONE image at a time."
-    )
-    print(
-        "  CAM2 and CAM6 remain completely separate."
-    )
-
-    print()
-
-    OUTPUT_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    print(f"Voxel size: {VOXEL_SIZE} m")
 
     # --------------------------------------------------------
-    # Calibration / image records
+    # Load calibration and file records
     # --------------------------------------------------------
 
     calibration = {}
     camera_records = {}
 
-    for camera in CAMERAS:
-
-        K, width, height = (
-            load_intrinsics(
-                camera
-            )
-        )
+    for camera in selected_cameras:
+        K, width, height = load_intrinsics(camera)
 
         calibration[camera] = {
             "K": K,
@@ -1228,337 +1074,354 @@ def main():
             "height": height,
         }
 
-        camera_records[camera] = (
-            load_images(camera)
-        )
+        camera_records[camera] = load_images(camera)
 
         print(
-            f"{camera}: "
-            f"{width} x {height}, "
+            f"{camera}: {width}x{height}, "
             f"{len(camera_records[camera]):,} images"
         )
 
     lidar_records = load_lidar_files()
 
-    print(
-        f"LiDAR files: "
-        f"{len(lidar_records):,}"
-    )
+    print(f"LiDAR scans: {len(lidar_records):,}")
 
     # --------------------------------------------------------
     # Load RF-DETR once
     # --------------------------------------------------------
 
-    print(
-        "\nLoading RF-DETR..."
-    )
+    print("\nLoading RF-DETR...")
 
-    rfdetr_model = (
-        RFDETRSegSmall.from_checkpoint(
+    with Timer() as rf_load:
+        rfdetr_model = RFDETRSegSmall.from_checkpoint(
             str(RFDETR_MODEL_PATH)
         )
-    )
+
+        rfdetr_model.inference(
+            dtype=torch.float16,
+            batch_size=1,
+        )
 
     print(
-        "Compiling RF-DETR FP16 inference..."
-    )
-
-    rfdetr_model.inference(
-        dtype=torch.float16,
-        batch_size=1,
-    )
-
-    print(
-        "RF-DETR ready."
+        f"RF-DETR setup: {rf_load.elapsed:.3f} s"
     )
 
     # --------------------------------------------------------
     # Load MapAnything once
     # --------------------------------------------------------
 
-    print(
-        "\nLoading MapAnything..."
-    )
+    print("\nLoading MapAnything...")
 
-    model = (
-        MapAnything
-        .from_pretrained(
-            "facebook/map-anything"
+    with Timer() as map_load:
+        model = (
+            MapAnything
+            .from_pretrained("facebook/map-anything")
+            .to(DEVICE)
         )
-        .to(DEVICE)
-    )
-
-    model.eval()
+        model.eval()
 
     print(
-        "MapAnything loaded."
+        f"MapAnything setup: {map_load.elapsed:.3f} s"
     )
 
     # --------------------------------------------------------
-    # Process every image
+    # Process images
     # --------------------------------------------------------
 
+    timing_records = []
+    skipped = 0
+    failed = 0
     total_processed = 0
-    total_skipped = 0
 
-    for camera in CAMERAS:
+    stop_requested = False
 
-        print(
-            "\n" + "=" * 80
+    with open(timing_csv, "w", newline="") as csv_file:
+        writer = csv.DictWriter(
+            csv_file,
+            fieldnames=TIMING_FIELDS,
         )
 
-        print(
-            f"PROCESSING ALL "
-            f"{camera} IMAGES"
-        )
+        writer.writeheader()
+        csv_file.flush()
 
-        print(
-            "=" * 80
-        )
+        for camera in selected_cameras:
 
-        camera_output = (
-            OUTPUT_DIR / camera
-        )
+            print("\n" + "=" * 80)
+            print(f"PROCESSING {camera}")
+            print("=" * 80)
 
-        camera_output.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
+            records = camera_records[camera]
+            camera_output = OUTPUT_DIR / camera
+            camera_output.mkdir(parents=True, exist_ok=True)
 
-        records = camera_records[
-            camera
-        ]
-
-        for image_index, (
-            image_timestamp,
-            image_path,
-        ) in enumerate(records):
-
-            output_path = (
-                camera_output
-                / f"{image_timestamp}.npz"
-            )
-
-            if output_path.exists():
-
-                print(
-                    f"[{image_index + 1}/"
-                    f"{len(records)}] "
-                    f"{camera} "
-                    f"{image_timestamp}: "
-                    f"already exists, "
-                    f"skipping"
-                )
-
-                total_skipped += 1
-                continue
-
-            print(
-                "\n" + "-" * 80
-            )
-
-            print(
-                f"[{image_index + 1}/"
-                f"{len(records)}] "
-                f"{camera}"
-            )
-
-            print(
-                f"Timestamp: "
-                f"{image_timestamp}"
-            )
-
-            print(
-                f"Image: "
-                f"{image_path}"
-            )
-
-            # ------------------------------------------------
-            # Load image
-            # ------------------------------------------------
-
-            image = np.asarray(
-                Image.open(
-                    image_path
-                ).convert("RGB")
-            )
-
-            # ------------------------------------------------
-            # Find synchronized LiDAR
-            # ------------------------------------------------
-
-            (
-                lidar_timestamp,
-                lidar_path,
-                lidar_delta,
-            ) = nearest_timestamp(
-                image_timestamp,
-                lidar_records,
-            )
-
-            if lidar_path is None:
-
-                print(
-                    "  WARNING: no "
-                    "synchronized LiDAR; "
-                    "skipping image."
-                )
-
-                total_skipped += 1
-                continue
-
-            print(
-                f"LiDAR: "
-                f"{lidar_path.name} "
-                f"(delta="
-                f"{lidar_delta / 1e6:.2f} ms)"
-            )
-
-            if (
-                lidar_delta
-                > SYNC_TOLERANCE_NS
-            ):
-
-                print(
-                    "  WARNING: LiDAR "
-                    "synchronization exceeds "
-                    "tolerance."
-                )
-
-            lidar = load_lidar_ply(
-                lidar_path
-            )
-
-            # ------------------------------------------------
-            # RF-DETR
-            # ------------------------------------------------
-
-            print(
-                "  RF-DETR segmentation..."
-            )
-
-            segmentation_map = (
-                run_rfdetr_segmentation(
-                    rfdetr_model,
-                    image,
-                )
-            )
-
-            # ------------------------------------------------
-            # MapAnything
-            # ------------------------------------------------
-
-            print(
-                "  MapAnything single-image "
-                "RGB + LiDAR inference..."
-            )
-
-            (
-                points,
-                valid_mask,
-                point_shape,
-            ) = run_mapanything_single(
-                model,
-                image,
-                lidar,
-                camera,
-                calibration[camera]["K"],
-                calibration[camera]["width"],
-                calibration[camera]["height"],
-            )
-
-            # ------------------------------------------------
-            # Voxelise
-            # ------------------------------------------------
-
-            print(
-                "  Voxelising..."
-            )
-
-            (
-                semantic,
-                occupancy,
-            ) = build_semantic_voxel_map(
-                points,
-                valid_mask,
-                segmentation_map,
-            )
-
-            occupied_count = int(
-                occupancy.sum()
-            )
-
-            hazard_count = int(
-                np.count_nonzero(
-                    semantic > 0
-                )
-            )
-
-            print(
-                f"  Occupied voxels: "
-                f"{occupied_count:,}"
-            )
-
-            print(
-                f"  Hazard voxels: "
-                f"{hazard_count:,}"
-            )
-
-            # ------------------------------------------------
-            # Save
-            # ------------------------------------------------
-
-            save_voxel_map(
-                output_path,
-                semantic,
-                occupancy,
-                camera,
+            for image_index, (
                 image_timestamp,
                 image_path,
-            )
+            ) in enumerate(records, start=1):
 
-            print(
-                f"  SAVED -> "
-                f"{output_path}"
-            )
+                if args.limit and total_processed >= args.limit:
+                    stop_requested = True
+                    break
 
-            total_processed += 1
+                output_path = (
+                    camera_output / f"{image_timestamp}.npz"
+                )
 
-            if DEVICE.type == "cuda":
-                torch.cuda.empty_cache()
+                if output_path.exists() and not args.overwrite:
+                    skipped += 1
+                    continue
 
-    print(
-        "\n" + "=" * 80
+                print("\n" + "-" * 80)
+                print(
+                    f"[{image_index}/{len(records)}] "
+                    f"{camera} | {image_timestamp}"
+                )
+
+                # Find nearest LiDAR before starting
+                # generation. Timestamp lookup is treated
+                # as dataset bookkeeping.
+                (
+                    lidar_timestamp,
+                    lidar_path,
+                    lidar_delta,
+                ) = nearest_timestamp(
+                    image_timestamp,
+                    lidar_records,
+                )
+
+                if lidar_path is None:
+                    print("  [SKIP] No LiDAR available")
+                    skipped += 1
+                    continue
+
+                if lidar_delta > SYNC_TOLERANCE_NS:
+                    print(
+                        f"  WARNING: LiDAR offset "
+                        f"{lidar_delta / 1e6:.2f} ms "
+                        f"exceeds 50 ms tolerance."
+                    )
+
+                # The existing pipeline proceeds with the
+                # nearest scan even when tolerance is exceeded.
+
+                timings = {}
+                frame_start = time.perf_counter()
+
+                try:
+                    # ----------------------------------------
+                    # Image loading
+                    # ----------------------------------------
+
+                    with Timer() as t:
+                        with Image.open(image_path) as im:
+                            image = np.asarray(
+                                im.convert("RGB")
+                            )
+
+                    timings["image_loading_s"] = t.elapsed
+
+                    # ----------------------------------------
+                    # LiDAR loading
+                    # ----------------------------------------
+
+                    with Timer() as t:
+                        lidar = load_lidar_ply(lidar_path)
+
+                    timings["lidar_loading_s"] = t.elapsed
+
+                    # ----------------------------------------
+                    # RF-DETR
+                    # ----------------------------------------
+
+                    print("  Running RF-DETR...")
+
+                    with Timer() as t:
+                        segmentation_map = (
+                            run_rfdetr_segmentation(
+                                rfdetr_model,
+                                image,
+                            )
+                        )
+
+                    timings["rfdetr_s"] = t.elapsed
+
+                    # ----------------------------------------
+                    # MapAnything
+                    # ----------------------------------------
+
+                    print("  Running MapAnything...")
+
+                    with Timer() as t:
+                        (
+                            points,
+                            valid_mask,
+                            point_shape,
+                        ) = run_mapanything_single(
+                            model,
+                            image,
+                            lidar,
+                            camera,
+                            calibration[camera]["K"],
+                            calibration[camera]["width"],
+                            calibration[camera]["height"],
+                        )
+
+                    timings["mapanything_s"] = t.elapsed
+
+                    # ----------------------------------------
+                    # Voxelisation
+                    # ----------------------------------------
+
+                    print("  Voxelising...")
+
+                    with Timer() as t:
+                        (
+                            semantic,
+                            occupancy,
+                        ) = build_semantic_voxel_map(
+                            points,
+                            valid_mask,
+                            segmentation_map,
+                        )
+
+                        occupied_count = int(
+                            np.count_nonzero(occupancy)
+                        )
+
+                        hazard_count = int(
+                            np.count_nonzero(semantic > 0)
+                        )
+
+                    timings["voxelisation_s"] = t.elapsed
+
+                    # ----------------------------------------
+                    # NPZ saving
+                    # ----------------------------------------
+
+                    print("  Saving NPZ...")
+
+                    with Timer() as t:
+                        save_voxel_map(
+                            output_path,
+                            semantic,
+                            occupancy,
+                            camera,
+                            image_timestamp,
+                            image_path,
+                        )
+
+                    timings["npz_saving_s"] = t.elapsed
+
+                    # ----------------------------------------
+                    # Total generation time
+                    # ----------------------------------------
+
+                    sync_gpu()
+
+                    timings["total_s"] = (
+                        time.perf_counter() - frame_start
+                    )
+
+                    stage_total = sum(
+                        timings[key]
+                        for key in [
+                            "image_loading_s",
+                            "lidar_loading_s",
+                            "rfdetr_s",
+                            "mapanything_s",
+                            "voxelisation_s",
+                            "npz_saving_s",
+                        ]
+                    )
+
+                    timings["other_s"] = max(
+                        0.0,
+                        timings["total_s"] - stage_total,
+                    )
+
+                    # ----------------------------------------
+                    # Record CSV
+                    # ----------------------------------------
+
+                    record = {
+                        "camera": camera,
+                        "timestamp": image_timestamp,
+                        "npz_path": str(output_path),
+                        **timings,
+                        "occupied_voxels": occupied_count,
+                        "hazard_voxels": hazard_count,
+                    }
+
+                    writer.writerow(record)
+                    csv_file.flush()
+
+                    timing_records.append(record)
+                    total_processed += 1
+
+                    running_average = np.mean(
+                        [r["total_s"] for r in timing_records]
+                    )
+
+                    print(
+                        f"  Occupied voxels: {occupied_count:,}"
+                    )
+
+                    print(
+                        f"  Hazard voxels:   {hazard_count:,}"
+                    )
+
+                    print_timing(
+                        timings,
+                        running_average,
+                        total_processed,
+                    )
+
+                    print(f"\n  SAVED -> {output_path}")
+
+                except Exception as exc:
+                    failed += 1
+
+                    # Remove incomplete output generated by
+                    # a failed save operation.
+                    if output_path.exists():
+                        try:
+                            output_path.unlink()
+                        except OSError:
+                            pass
+
+                    print(
+                        f"  [FAILED] {camera} "
+                        f"{image_timestamp}: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+
+                    raise
+
+                finally:
+                    # Preserve original cache-clearing behavior.
+                    if DEVICE.type == "cuda":
+                        torch.cuda.empty_cache()
+
+            if stop_requested:
+                break
+
+    # --------------------------------------------------------
+    # Final statistics
+    # --------------------------------------------------------
+
+    wall_time = time.perf_counter() - run_start
+
+    print_summary(
+        timing_records,
+        wall_time,
+        skipped,
+        failed,
     )
 
-    print("DONE")
+    print("\nOUTPUT FILES")
+    print(f"  Voxels: {OUTPUT_DIR}")
+    print(f"  Timing: {timing_csv}")
 
-    print(
-        "=" * 80
-    )
-
-    print(
-        f"Processed: "
-        f"{total_processed:,}"
-    )
-
-    print(
-        f"Skipped:   "
-        f"{total_skipped:,}"
-    )
-
-    print(
-        f"Output:    "
-        f"{OUTPUT_DIR}"
-    )
-
-    print()
-
-    print(
-        "Each image now has its own "
-        "independent camera-relative "
-        "semantic voxel map."
-    )
+    print("\nDONE")
 
 
 if __name__ == "__main__":

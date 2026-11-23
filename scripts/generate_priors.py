@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-"""Generate cached RF-DETR + LiDAR priors for V5, with projection checks.
+"""Generate cached RF-DETR + LiDAR priors, with projection checks.
 
 The generated priors are saved at PRIOR_SIZE x PRIOR_SIZE.
 
