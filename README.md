@@ -174,15 +174,19 @@ Every non-target voxel—including unobserved MapAnything locations—is deliber
 
 ### Baseline package
 
-The root package metadata declares Python `>=3.10` and MapAnything dependencies. Install a CUDA-compatible PyTorch build appropriate to the target machine, then install the repository:
+The root package metadata declares Python `>=3.10` and the baseline MapAnything dependencies. The project-specific scripts additionally require PyTorch, TorchVision, and (for segmentation workflows) RF-DETR. Install a CUDA-compatible PyTorch/TorchVision build appropriate to the machine first, then install the baseline dependencies listed in `pyproject.toml` and the additional stage-specific packages below.
 
 ```bash
 git clone <repository-url>
 cd FYP
 
-# Create/activate a supported Python environment and install PyTorch for your CUDA platform first.
+# Create/activate a Python 3.10+ environment and install a matching
+# PyTorch/TorchVision build for your CUDA platform first.
+# Then install the dependencies declared in pyproject.toml.
 python -m pip install -e .
 ```
+
+**Packaging caveat:** `pyproject.toml` names `readme.md` (lowercase), while this repository contains `README.md` (uppercase). On case-sensitive systems, the editable install command above may fail during metadata preparation. `setup.py` only delegates to setuptools and does not supply dependencies. If that occurs, install the dependencies from `pyproject.toml` into the environment and run the scripts from the repository root (the local `mapanything/` package is then importable from the working directory). This caveat is visible in the checked-in metadata; it has not been tested by running an install.
 
 Optional MapAnything extras are defined in [`pyproject.toml`](pyproject.toml), including `.[colmap]` and `.[all]`. Consult the included upstream [training guide](train.md) and [data-processing guide](data_processing/README.md) for original MapAnything workflows.
 
@@ -193,7 +197,7 @@ The hazard scripts import packages not fully pinned by the root metadata:
 | Stage | Requirements evident from source |
 | --- | --- |
 | RF-DETR | API-compatible `rfdetr` exposing `RFDETRSegSmall` and a trained checkpoint |
-| ROS extraction | `rosbags`, SBG ROS message definitions, OpenCV, NumPy |
+| ROS extraction | `rosbags`, OpenCV, NumPy, and external SBG ROS 2 `.msg` definitions |
 | GPS filtering | `pandas`, `matplotlib` |
 | V10.1 training/inference | PyTorch, TorchVision, Pillow, NumPy, CUDA; RF-DETR for live priors |
 | Label generation | MapAnything dependencies and access to `facebook/map-anything` pretrained weights/cache |
@@ -208,17 +212,17 @@ MapAnything/RF-DETR label generation uses GPU. V10.1 requires CUDA and dense 5 c
 
 The following order reflects actual input/output contracts. Paths are intentionally symbolic.
 
-1. Configure and run [`scripts/fastros_extract.py`](scripts/fastros_extract.py) for a ROS 2 bag with expected image, LiDAR, IMU, GPS, and TF topics.
+1. Edit the machine-local paths at the top of [`scripts/fastros_extract.py`](scripts/fastros_extract.py), then run `python scripts/fastros_extract.py` against a ROS 2 bag with the expected camera, LiDAR, IMU, GPS, and `/tf_static` topics. The script currently has no command-line options. It expects the SBG message definitions in a separate `sbg_ros2_driver/msg` directory and writes under `<bag>/extracted/`.
 2. Validate CAM2/CAM6 RGB-LiDAR calibration; `generate_priors.py` can create projection overlays.
-3. Configure and run [`scripts/new_fine_dataset.py`](scripts/new_fine_dataset.py) with the dataset root and RF-DETR checkpoint to create per-image semantic voxel NPZs.
-4. Optionally run [`scripts/filter_gps_npzs.py`](scripts/filter_gps_npzs.py) to apply its configured exclusion-polygon filter.
-5. Run [`scripts/generate_priors.py`](scripts/generate_priors.py) to create matched eight-channel prior NPZs.
+3. Edit the machine-local `BAG_ROOT` and `RFDETR_MODEL_PATH` constants in [`scripts/new_fine_dataset.py`](scripts/new_fine_dataset.py), then run a command such as `python scripts/new_fine_dataset.py --camera CAM2 --limit 10` (`--camera` accepts `CAM2`, `CAM6`, or `both`; `--limit 0` processes all; `--overwrite` regenerates existing outputs). It writes `semantic_voxels_new_roi_5cm/{CAM2,CAM6}/<timestamp>.npz` plus generation timing CSV. Each NPZ has `semantic`, `occupancy`, `voxel_size`, `origin`, `bounds`, `camera`, `timestamp`, `image_path`, and `class_names` arrays. Unobserved semantic voxels are `-1`; observed non-hazard is `0`; generator classes are `1..5`.
+4. Optionally run [`scripts/filter_gps_npzs.py`](scripts/filter_gps_npzs.py) after editing its paths/polygon constants. It is a standalone script without CLI options; it requires `extracted/gps/position.csv` and copies retained NPZs into `semantic_voxels_new_roi_5cm_filtered/`, with a filter audit CSV.
+5. Edit the paths in [`scripts/generate_priors.py`](scripts/generate_priors.py), then run `python scripts/generate_priors.py` (no CLI options) to generate matched eight-channel prior NPZs and projection-check images. It requires extracted CAM2/CAM6 images, camera-info CSVs, LiDAR PLYs, and a compatible RF-DETR checkpoint.
 
-The main trainer treats the prior directory as the master index, matching each prior by camera/timestamp to the semantic target and using the source-image path stored in that target.
+The main trainer's constants currently point to `semantic_voxels_new_roi_5cm_filtered/` and `v5_priors_letterboxed/`; both paths and the calibration files under `extracted/calibration/` must exist and agree with the sample timestamps. It uses the prior directory as its sample index and matches by camera/timestamp, then reads the source-image path from each semantic target. Several scripts have separate hard-coded `DATASET_ROOT`/checkpoint values, so changing one script does not reconfigure the others.
 
 ## Training and experiments
 
-The verified main entry point is [`scripts/optimised_trainer.py`](scripts/optimised_trainer.py):
+The main entry point is [`scripts/optimised_trainer.py`](scripts/optimised_trainer.py). After editing its hard-coded `DATASET_ROOT` and ensuring the matching calibration, semantic NPZs, and priors are present, invoke:
 
 ```bash
 python scripts/optimised_trainer.py \
@@ -231,13 +235,15 @@ It also supports `--lr`, `--overfit_test`, `--no_sampler`, and `--resume [CHECKP
 
 [`run_optimised.slurm`](run_optimised.slurm), [`run_lidar_ablation.slurm`](run_lidar_ablation.slurm), and [`run_prior_ablation.slurm`](run_prior_ablation.slurm) launch the corresponding GPU jobs, but contain site-specific module, conda, and directory values that must be adapted outside the original HPC environment.
 
-For RGB-only baseline comparison, [`scripts/train_and_infer_3d_unets.py`](scripts/train_and_infer_3d_unets.py) exposes:
+For RGB-only baseline comparison, [`scripts/train_and_infer_3d_unets.py`](scripts/train_and_infer_3d_unets.py) requires a model argument and exposes:
 
 ```bash
 python scripts/train_and_infer_3d_unets.py \
   --model image2voxel_resunet \
   --epochs 50
 ```
+
+For a small generation run, `python scripts/new_fine_dataset.py --camera CAM2 --limit 10` is supported. [`scripts/generate_priors.py`](scripts/generate_priors.py), [`scripts/fastros_extract.py`](scripts/fastros_extract.py), and [`scripts/filter_gps_npzs.py`](scripts/filter_gps_npzs.py) expose no CLI arguments; configure their constants in source first. The supplied SLURM files invoke site-specific absolute paths and an environment named `mapanything2`; they are examples for that HPC setup and must be adapted before submission.
 
 No numerical results are quoted here: the repository does not contain a reliable tracked experiment summary from which to report them.
 
